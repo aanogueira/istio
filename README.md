@@ -9,4 +9,3 @@ to be ready before the Deployment catches the `NLB` changes.
 > Currently supported versions can be check in the `releases`/`tags` section of this project.
 
 **Docker images**: [operator](https://hub.docker.com/r/aanogueira/operator)
-
