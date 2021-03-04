@@ -335,7 +335,7 @@ func (os K8sObjects) YAMLManifest() (string, error) {
 // Sort will order the items in K8sObjects in order of score, group, kind, name.  The intent is to
 // have a deterministic ordering in which K8sObjects are applied.
 func (os K8sObjects) Sort(score func(o *K8sObject) int) {
-	sort.Slice(os, func(i, j int) bool {
+	sort.Slice(os, func(j, i int) bool {
 		iScore := score(os[i])
 		jScore := score(os[j])
 		return iScore < jScore ||
