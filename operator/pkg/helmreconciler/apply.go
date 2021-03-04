@@ -106,6 +106,9 @@ func (h *HelmReconciler) ApplyManifest(manifest name.Manifest) (object.K8sObject
 			processedObjects = append(processedObjects, obj)
 			// Update the cache with the latest object.
 			objectCache.Cache[obj.Hash()] = obj
+			if obj.Kind == "Service" {
+				time.Sleep(5 * time.Second)
+			}
 		}
 	}
 
