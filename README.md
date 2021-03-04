@@ -6,7 +6,7 @@ is applied a bit later in order for the
 [AWS Target Group Binding](https://kubernetes-sigs.github.io/aws-load-balancer-controller/guide/targetgroupbinding/targetgroupbinding/)
 to be ready before the Deployment catches the `NLB` changes.
 
-Currently supported versions can be check in the `releases`/`tags` section of this project.
+> Currently supported versions can be check in the `releases`/`tags` section of this project.
 
-> Docker images: [operator](https://hub.docker.com/r/aanogueira/operator)
+**Docker images**: [operator](https://hub.docker.com/r/aanogueira/operator)
 
