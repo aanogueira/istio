@@ -22,6 +22,7 @@ import (
 	"github.com/cenkalti/backoff"
 
 	mcp "istio.io/api/mcp/v1alpha1"
+
 	"istio.io/istio/pkg/mcp/status"
 )
 

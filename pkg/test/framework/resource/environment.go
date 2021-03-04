@@ -32,8 +32,6 @@ type Environment interface {
 
 	// Clusters in this Environment. There will always be at least one.
 	Clusters() Clusters
-
-	IsMultinetwork() bool
 }
 
 var _ Environment = FakeEnvironment{}
@@ -47,10 +45,6 @@ type FakeEnvironment struct {
 
 func (f FakeEnvironment) ID() ID {
 	return FakeID(f.IDValue)
-}
-
-func (f FakeEnvironment) IsMultinetwork() bool {
-	return false
 }
 
 func (f FakeEnvironment) EnvironmentName() string {

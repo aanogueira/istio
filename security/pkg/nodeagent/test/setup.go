@@ -27,6 +27,7 @@ import (
 	ghc "google.golang.org/grpc/health/grpc_health_v1"
 
 	"istio.io/istio/pkg/security"
+
 	"istio.io/istio/pkg/spiffe"
 	istioEnv "istio.io/istio/pkg/test/env"
 	"istio.io/istio/security/pkg/nodeagent/cache"
@@ -174,7 +175,8 @@ func (e *Env) StartSDSServer(t *testing.T) {
 		t.Fatalf("failed to create CA client: %+v", err)
 	}
 	secretFetcher := &secretfetcher.SecretFetcher{
-		CaClient: caClient,
+		UseCaClient: true,
+		CaClient:    caClient,
 	}
 	opt := e.cacheOptions(t)
 	workloadSecretCache := cache.NewSecretCache(secretFetcher, sds.NotifyProxy, opt)

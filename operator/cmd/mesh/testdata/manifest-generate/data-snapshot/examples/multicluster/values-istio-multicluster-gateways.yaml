@@ -19,6 +19,8 @@ spec:
       multiCluster:
         enabled: true
 
+      controlPlaneSecurityEnabled: true
+
     gateways:
       istio-egressgateway:
         env:

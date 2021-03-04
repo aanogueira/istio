@@ -24,7 +24,7 @@ import (
 )
 
 func TestDispatcher(t *testing.T) {
-	g := gomega.NewWithT(t)
+	g := gomega.NewGomegaWithT(t)
 
 	d := &Listener{}
 

@@ -14,14 +14,12 @@
 package sidecar
 
 import (
-	"fmt"
-
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
 	"istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/galley/pkg/config/analysis"
-	"istio.io/istio/galley/pkg/config/analysis/analyzers/util"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
 	"istio.io/istio/pkg/config/resource"
 	"istio.io/istio/pkg/config/schema/collection"
@@ -86,14 +84,7 @@ func (a *SelectorAnalyzer) Analyze(c analysis.Context) {
 		})
 
 		if !foundPod {
-			m := msg.NewReferencedResourceNotFound(rs, "selector", sel.String())
-
-			label := util.ExtractLabelFromSelectorString(sel.String())
-			if line, ok := util.ErrorLine(rs, fmt.Sprintf(util.WorkloadSelector, label)); ok {
-				m.Line = line
-			}
-
-			c.Report(collections.IstioNetworkingV1Alpha3Sidecars.Name(), m)
+			c.Report(collections.IstioNetworkingV1Alpha3Sidecars.Name(), msg.NewReferencedResourceNotFound(rs, "selector", sel.String()))
 		}
 
 		return true
@@ -107,15 +98,8 @@ func (a *SelectorAnalyzer) Analyze(c analysis.Context) {
 		sNames := getNames(sList)
 
 		for _, rs := range sList {
-
-			m := msg.NewConflictingSidecarWorkloadSelectors(rs, sNames,
-				p.Namespace.String(), p.Name.String())
-
-			if line, ok := util.ErrorLine(rs, fmt.Sprintf(util.MetadataName)); ok {
-				m.Line = line
-			}
-
-			c.Report(collections.IstioNetworkingV1Alpha3Sidecars.Name(), m)
+			c.Report(collections.IstioNetworkingV1Alpha3Sidecars.Name(), msg.NewConflictingSidecarWorkloadSelectors(rs, sNames,
+				p.Namespace.String(), p.Name.String()))
 		}
 	}
 }

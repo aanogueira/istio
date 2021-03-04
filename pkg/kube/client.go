@@ -23,23 +23,17 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
-	"reflect"
 	"strings"
-	"time"
 
 	"github.com/hashicorp/go-multierror"
-	"go.uber.org/atomic"
-	"google.golang.org/grpc/credentials"
 	v1 "k8s.io/api/core/v1"
 	kubeExtClient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	extfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
 	kubeVersion "k8s.io/apimachinery/pkg/version"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -55,8 +49,6 @@ import (
 	metadatafake "k8s.io/client-go/metadata/fake"
 	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/rest"
-	clienttesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/cmd/apply"
@@ -66,10 +58,13 @@ import (
 	serviceapisfake "sigs.k8s.io/service-apis/pkg/client/clientset/versioned/fake"
 	serviceapisinformer "sigs.k8s.io/service-apis/pkg/client/informers/externalversions"
 
-	"istio.io/api/label"
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
 	istiofake "istio.io/client-go/pkg/clientset/versioned/fake"
 	istioinformer "istio.io/client-go/pkg/informers/externalversions"
+
+	"istio.io/api/label"
+
+	"istio.io/pkg/log"
 	"istio.io/pkg/version"
 )
 
@@ -176,13 +171,6 @@ type ExtendedClient interface {
 
 	// DeleteYAMLFilesDryRun performs a dry run for deleting the resources in the given YAML files.
 	DeleteYAMLFilesDryRun(namespace string, yamlFiles ...string) error
-
-	// CreatePerRPCCredentials creates a gRPC bearer token provider that can create (and renew!) Istio tokens
-	CreatePerRPCCredentials(ctx context.Context, tokenNamespace, tokenServiceAccount string, audiences []string,
-		expirationSeconds int64) (credentials.PerRPCCredentials, error)
-
-	// UtilFactory returns a kubectl factory
-	UtilFactory() util.Factory
 }
 
 var _ Client = &client{}
@@ -190,13 +178,9 @@ var _ ExtendedClient = &client{}
 
 const resyncInterval = 0
 
-// NewFakeClient creates a new, fake, client
-func NewFakeClient(objects ...runtime.Object) ExtendedClient {
-	c := &client{
-		informerWatchesPending: atomic.NewInt32(0),
-	}
-	fakeClient := fake.NewSimpleClientset(objects...)
-	c.Interface = fakeClient
+func NewFakeClient(objects ...runtime.Object) Client {
+	var c client
+	c.Interface = fake.NewSimpleClientset(objects...)
 	c.kube = c.Interface
 	c.kubeInformer = informers.NewSharedInformerFactory(c.Interface, resyncInterval)
 
@@ -211,8 +195,7 @@ func NewFakeClient(objects ...runtime.Object) ExtendedClient {
 	c.dynamic = dynamicfake.NewSimpleDynamicClient(s)
 	c.dynamicInformer = dynamicinformer.NewDynamicSharedInformerFactory(c.dynamic, resyncInterval)
 
-	istioFake := istiofake.NewSimpleClientset()
-	c.istio = istioFake
+	c.istio = istiofake.NewSimpleClientset()
 	c.istioInformer = istioinformer.NewSharedInformerFactoryWithOptions(c.istio, resyncInterval)
 
 	c.serviceapis = serviceapisfake.NewSimpleClientset()
@@ -220,37 +203,7 @@ func NewFakeClient(objects ...runtime.Object) ExtendedClient {
 
 	c.extSet = extfake.NewSimpleClientset()
 
-	// https://github.com/kubernetes/kubernetes/issues/95372
-	// There is a race condition in the client fakes, where events that happen between the List and Watch
-	// of an informer are dropped. To avoid this, we explicitly manage the list and watch, ensuring all lists
-	// have an associated watch before continuing.
-	// This would likely break any direct calls to List(), but for now our tests don't do that anyways. If we need
-	// to in the future we will need to identify the Lists that have a corresponding Watch, possibly by looking
-	// at created Informers
-	// an atomic.Int is used instead of sync.WaitGroup because wg.Add and wg.Wait cannot be called concurrently
-	listReactor := func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
-		c.informerWatchesPending.Inc()
-		return false, nil, nil
-	}
-	watchReactor := func(tracker clienttesting.ObjectTracker) func(action clienttesting.Action) (handled bool, ret watch.Interface, err error) {
-		return func(action clienttesting.Action) (handled bool, ret watch.Interface, err error) {
-			gvr := action.GetResource()
-			ns := action.GetNamespace()
-			watch, err := tracker.Watch(gvr, ns)
-			if err != nil {
-				return false, nil, err
-			}
-			c.informerWatchesPending.Dec()
-			return true, watch, nil
-		}
-	}
-	fakeClient.PrependReactor("list", "*", listReactor)
-	fakeClient.PrependWatchReactor("*", watchReactor(fakeClient.Tracker()))
-	istioFake.PrependReactor("list", "*", listReactor)
-	istioFake.PrependWatchReactor("*", watchReactor(istioFake.Tracker()))
-	c.fastSync = true
-
-	return c
+	return &c
 }
 
 // Client is a helper wrapper around the Kube RESTClient for istioctl -> Pilot/Envoy/Mesh related things
@@ -281,10 +234,6 @@ type client struct {
 
 	serviceapis          serviceapisclient.Interface
 	serviceapisInformers serviceapisinformer.SharedInformerFactory
-
-	// If enable, will wait for cache syncs with extremely short delay. This should be used only for tests
-	fastSync               bool
-	informerWatchesPending *atomic.Int32
 }
 
 // newClientInternal creates a Kubernetes client from the given factory.
@@ -418,79 +367,11 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
 	c.metadataInformer.Start(stop)
 	c.istioInformer.Start(stop)
 	c.serviceapisInformers.Start(stop)
-	if c.fastSync {
-		// WaitForCacheSync will virtually never be synced on the first call, as its called immediately after Start()
-		// This triggers a 100ms delay per call, which is often called 2-3 times in a test, delaying tests.
-		// Instead, we add an aggressive sync polling
-		fastWaitForCacheSync(c.kubeInformer)
-		fastWaitForCacheSyncDynamic(c.dynamicInformer)
-		fastWaitForCacheSyncDynamic(c.metadataInformer)
-		fastWaitForCacheSync(c.istioInformer)
-		fastWaitForCacheSync(c.serviceapisInformers)
-		_ = wait.PollImmediate(time.Microsecond, wait.ForeverTestTimeout, func() (bool, error) {
-			if c.informerWatchesPending.Load() == 0 {
-				return true, nil
-			}
-			return false, nil
-		})
-	} else {
-		c.kubeInformer.WaitForCacheSync(stop)
-		c.dynamicInformer.WaitForCacheSync(stop)
-		c.metadataInformer.WaitForCacheSync(stop)
-		c.istioInformer.WaitForCacheSync(stop)
-		c.serviceapisInformers.WaitForCacheSync(stop)
-	}
-}
-
-type reflectInformerSync interface {
-	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
-}
-
-type dynamicInformerSync interface {
-	WaitForCacheSync(stopCh <-chan struct{}) map[schema.GroupVersionResource]bool
-}
-
-// Wait for cache sync immediately, rather than with 100ms delay which slows tests
-// See https://github.com/kubernetes/kubernetes/issues/95262#issuecomment-703141573
-func fastWaitForCacheSync(informerFactory reflectInformerSync) {
-	returnImmediately := make(chan struct{})
-	close(returnImmediately)
-	_ = wait.PollImmediate(time.Microsecond, wait.ForeverTestTimeout, func() (bool, error) {
-		for _, synced := range informerFactory.WaitForCacheSync(returnImmediately) {
-			if !synced {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
-}
-
-func fastWaitForCacheSyncDynamic(informerFactory dynamicInformerSync) {
-	returnImmediately := make(chan struct{})
-	close(returnImmediately)
-	_ = wait.PollImmediate(time.Microsecond, wait.ForeverTestTimeout, func() (bool, error) {
-		for _, synced := range informerFactory.WaitForCacheSync(returnImmediately) {
-			if !synced {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
-}
-
-// WaitForCacheSyncInterval waits for caches to populate, with explicitly configured interval
-func WaitForCacheSyncInterval(stopCh <-chan struct{}, interval time.Duration, cacheSyncs ...cache.InformerSynced) bool {
-	err := wait.PollImmediateUntil(interval,
-		func() (bool, error) {
-			for _, syncFunc := range cacheSyncs {
-				if !syncFunc() {
-					return false, nil
-				}
-			}
-			return true, nil
-		},
-		stopCh)
-	return err == nil
+	c.kubeInformer.WaitForCacheSync(stop)
+	c.dynamicInformer.WaitForCacheSync(stop)
+	c.metadataInformer.WaitForCacheSync(stop)
+	c.istioInformer.WaitForCacheSync(stop)
+	c.serviceapisInformers.WaitForCacheSync(stop)
 }
 
 func (c *client) Revision() string {
@@ -570,6 +451,28 @@ func (c *client) PodLogs(ctx context.Context, podName, podNamespace, container s
 	return builder.String(), nil
 }
 
+// proxyGet returns a response of the pod by calling it through the proxy.
+// Not a part of client-go https://github.com/kubernetes/kubernetes/issues/90768
+func (c *client) proxyGet(name, namespace, path string, port int) rest.ResponseWrapper {
+	pathURL, err := url.Parse(path)
+	if err != nil {
+		log.Errorf("failed to parse path %s: %v", path, err)
+		pathURL = &url.URL{Path: path}
+	}
+	request := c.restClient.Get().
+		Namespace(namespace).
+		Resource("pods").
+		SubResource("proxy").
+		Name(fmt.Sprintf("%s:%d", name, port)).
+		Suffix(pathURL.Path)
+	for key, vals := range pathURL.Query() {
+		for _, val := range vals {
+			request = request.Param(key, val)
+		}
+	}
+	return request
+}
+
 func (c *client) AllDiscoveryDo(ctx context.Context, istiodNamespace, path string) (map[string][]byte, error) {
 	istiods, err := c.GetIstioPods(ctx, istiodNamespace, map[string]string{
 		"labelSelector": "app=istiod",
@@ -579,12 +482,12 @@ func (c *client) AllDiscoveryDo(ctx context.Context, istiodNamespace, path strin
 		return nil, err
 	}
 	if len(istiods) == 0 {
-		return nil, errors.New("unable to find any Istiod instances")
+		return nil, errors.New("unable to find any Pilot instances")
 	}
 	var errs error
 	result := map[string][]byte{}
 	for _, istiod := range istiods {
-		res, err := c.CoreV1().Pods(istiod.Namespace).ProxyGet("", istiod.Name, "15014", path, nil).DoRaw(ctx)
+		res, err := c.proxyGet(istiod.Name, istiod.Namespace, path, 8080).DoRaw(ctx)
 		if err != nil {
 			execRes, execErr := c.extractExecResult(istiod.Name, istiod.Namespace, discoveryContainer,
 				fmt.Sprintf("%s request GET %s", pilotDiscoveryPath, path))
@@ -604,11 +507,7 @@ func (c *client) AllDiscoveryDo(ctx context.Context, istiodNamespace, path strin
 			result[istiod.Name] = res
 		}
 	}
-	// If any Discovery servers responded, treat as a success
-	if len(result) > 0 {
-		return result, nil
-	}
-	return nil, errs
+	return result, err
 }
 
 func (c *client) EnvoyDo(ctx context.Context, podName, podNamespace, method, path string, _ []byte) ([]byte, error) {
@@ -701,7 +600,7 @@ func (c *client) GetIstioVersions(ctx context.Context, namespace string) (*versi
 
 		// :15014/version returns something like
 		// 1.7-alpha.9c900ba74d10a1affe7c23557ef0eebd6103b03c-9c900ba74d10a1affe7c23557ef0eebd6103b03c-Clean
-		result, err := c.CoreV1().Pods(pod.Namespace).ProxyGet("", pod.Name, "15014", "/version", nil).DoRaw(ctx)
+		result, err := c.proxyGet(pod.Name, pod.Namespace, "/version", 15014).DoRaw(ctx)
 		if err != nil {
 			bi, execErr := c.getIstioVersionUsingExec(&pod)
 			if execErr != nil {
@@ -807,15 +706,6 @@ func (c *client) ApplyYAMLFilesDryRun(namespace string, yamlFiles ...string) err
 		}
 	}
 	return nil
-}
-
-func (c *client) CreatePerRPCCredentials(ctx context.Context, tokenNamespace, tokenServiceAccount string, audiences []string,
-	expirationSeconds int64) (credentials.PerRPCCredentials, error) {
-	return NewRPCCredentials(c, tokenNamespace, tokenServiceAccount, audiences, expirationSeconds)
-}
-
-func (c *client) UtilFactory() util.Factory {
-	return c.clientFactory
 }
 
 func (c *client) applyYAMLFile(namespace string, dryRun bool, file string) error {

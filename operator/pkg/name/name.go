@@ -65,7 +65,6 @@ const (
 	MeshPolicyStr         = "MeshPolicy"
 	PeerAuthenticationStr = "PeerAuthentication"
 	VirtualServiceStr     = "VirtualService"
-	IstioOperatorStr      = "IstioOperator"
 )
 
 // Istio API Group Names
@@ -86,10 +85,6 @@ const (
 
 	// DefaultProfileName is the name of the default profile.
 	DefaultProfileName = "default"
-
-	// installedSpecCRPrefix is the prefix of any IstioOperator CR stored in the cluster that is a copy of the CR used
-	// in the last install operation.
-	InstalledSpecCRPrefix = "installed-state"
 )
 
 // ComponentName is a component name string, typed to constrain allowed values.
@@ -100,6 +95,8 @@ const (
 	// are used for struct traversal.
 	IstioBaseComponentName ComponentName = "Base"
 	PilotComponentName     ComponentName = "Pilot"
+	PolicyComponentName    ComponentName = "Policy"
+	TelemetryComponentName ComponentName = "Telemetry"
 
 	CNIComponentName ComponentName = "Cni"
 
@@ -127,6 +124,8 @@ var (
 	AllCoreComponentNames = []ComponentName{
 		IstioBaseComponentName,
 		PilotComponentName,
+		PolicyComponentName,
+		TelemetryComponentName,
 		CNIComponentName,
 		IstiodRemoteComponentName,
 	}
@@ -153,6 +152,8 @@ var (
 	userFacingComponentNames = map[ComponentName]string{
 		IstioBaseComponentName:          "Istio core",
 		PilotComponentName:              "Istiod",
+		PolicyComponentName:             "Policy",
+		TelemetryComponentName:          "Telemetry",
 		CNIComponentName:                "CNI",
 		IngressComponentName:            "Ingress gateways",
 		EgressComponentName:             "Egress gateways",

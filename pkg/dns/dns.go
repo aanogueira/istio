@@ -24,10 +24,12 @@ import (
 
 	"github.com/miekg/dns"
 
-	"istio.io/istio/pkg/config/constants"
+	"istio.io/pkg/monitoring"
+
 	"istio.io/pkg/env"
 	"istio.io/pkg/log"
-	"istio.io/pkg/monitoring"
+
+	"istio.io/istio/pkg/config/constants"
 )
 
 // Based on istio-ecosystem/istio-coredns-plugin

@@ -19,8 +19,6 @@ import (
 	"reflect"
 	"testing"
 
-	"golang.org/x/net/context"
-	"google.golang.org/grpc/metadata"
 	k8sauth "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -28,7 +26,10 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"istio.io/istio/pkg/jwt"
-	"istio.io/istio/pkg/security"
+	"istio.io/istio/security/pkg/k8s/tokenreview"
+
+	"golang.org/x/net/context"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestNewKubeJWTAuthenticator(t *testing.T) {
@@ -69,6 +70,26 @@ func TestAuthenticate(t *testing.T) {
 			},
 			expectedErrMsg: "target JWT extraction error: no bearer token exists in HTTP authorization header",
 		},
+		"Review error": {
+			token: "bearer-token",
+			metadata: metadata.MD{
+				"clusterid": []string{primaryCluster},
+				"authorization": []string{
+					"Basic callername",
+				},
+			},
+			expectedErrMsg: "failed to validate the JWT: invalid JWT policy: ",
+		},
+		"Wrong identity length": {
+			token: "bearer-token",
+			metadata: metadata.MD{
+				"clusterid": []string{primaryCluster},
+				"authorization": []string{
+					"Basic callername",
+				},
+			},
+			expectedErrMsg: "failed to validate the JWT: invalid JWT policy: ",
+		},
 		"token not authenticated": {
 			token: invlidToken,
 			metadata: metadata.MD{
@@ -78,7 +99,7 @@ func TestAuthenticate(t *testing.T) {
 				},
 			},
 			jwtPolicy:      jwt.PolicyFirstParty,
-			expectedErrMsg: "failed to validate the JWT from cluster Kubernetes: the token is not authenticated",
+			expectedErrMsg: "failed to validate the JWT: the token is not authenticated",
 		},
 		"token authenticated": {
 			token: "bearer-token",
@@ -92,7 +113,7 @@ func TestAuthenticate(t *testing.T) {
 			expectedID:     fmt.Sprintf(identityTemplate, "example.com", "default", "example-pod-sa"),
 			expectedErrMsg: "",
 		},
-		"not found remote cluster results in error": {
+		"not found remote cluster fallback to primary cluster": {
 			remoteCluster: false,
 			token:         "bearer-token",
 			metadata: metadata.MD{
@@ -102,7 +123,8 @@ func TestAuthenticate(t *testing.T) {
 				},
 			},
 			jwtPolicy:      jwt.PolicyFirstParty,
-			expectedErrMsg: "could not get cluster non-exist's kube client",
+			expectedID:     fmt.Sprintf(identityTemplate, "example.com", "default", "example-pod-sa"),
+			expectedErrMsg: "",
 		},
 	}
 
@@ -123,7 +145,7 @@ func TestAuthenticate(t *testing.T) {
 				},
 			}
 			if tc.jwtPolicy == jwt.PolicyThirdParty {
-				tokenReview.Spec.Audiences = security.TokenAudiences
+				tokenReview.Spec.Audiences = []string{tokenreview.DefaultAudience}
 			}
 
 			tokenReview.Status.Audiences = []string{}

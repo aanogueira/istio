@@ -294,17 +294,16 @@ func ParseK8sObjectsFromYAMLManifestFailOption(manifest string, failOnError bool
 }
 
 func removeNonYAMLLines(yms string) string {
-	var b strings.Builder
+	out := ""
 	for _, s := range strings.Split(yms, "\n") {
 		if strings.HasPrefix(s, "#") {
 			continue
 		}
-		b.WriteString(s)
-		b.WriteString("\n")
+		out += s + "\n"
 	}
 
 	// helm charts sometimes emits blank objects with just a "disabled" comment.
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(out)
 }
 
 // YAMLManifest returns a YAML representation of K8sObjects os.
@@ -336,7 +335,7 @@ func (os K8sObjects) YAMLManifest() (string, error) {
 // Sort will order the items in K8sObjects in order of score, group, kind, name.  The intent is to
 // have a deterministic ordering in which K8sObjects are applied.
 func (os K8sObjects) Sort(score func(o *K8sObject) int) {
-	sort.Slice(os, func(j, i int) bool {
+	sort.Slice(os, func(i, j int) bool {
 		iScore := score(os[i])
 		jScore := score(os[j])
 		return iScore < jScore ||
@@ -380,11 +379,6 @@ func (o *K8sObject) Valid() bool {
 		return false
 	}
 	return true
-}
-
-// FullName returns namespace/name of K8s object
-func (o *K8sObject) FullName() string {
-	return fmt.Sprintf("%s/%s", o.Namespace, o.Name)
 }
 
 // Equal returns true if o and other are both valid and equal to each other.

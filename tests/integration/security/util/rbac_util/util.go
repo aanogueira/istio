@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,10 +18,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"testing"
 	"time"
 
 	"istio.io/istio/pkg/test/echo/common/response"
-	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/tests/integration/security/util/connection"
 )
@@ -33,10 +32,6 @@ type TestCase struct {
 	ExpectAllowed bool
 	Jwt           string
 	Headers       map[string]string
-	// Indicates whether a test should be run in the multicluster environment.
-	// This is a temporary flag during the converting tests into multicluster supported.
-	// TODO: Remove this flag when all tests support multicluster
-	SkippedForMulticluster bool
 }
 
 func getError(req connection.Checker, expect, actual string) error {
@@ -77,9 +72,6 @@ func (tc TestCase) CheckRBACRequest() error {
 		if err != nil {
 			return getError(req, "allow with code 200", fmt.Sprintf("error: %v", err))
 		}
-		if req.DestClusters.IsMulticluster() {
-			return resp.CheckReachedClusters(req.DestClusters)
-		}
 	} else {
 		if strings.HasPrefix(req.Options.PortName, "tcp") || req.Options.PortName == "grpc" {
 			expectedErrMsg := "EOF" // TCP deny message.
@@ -109,7 +101,7 @@ func (tc TestCase) CheckRBACRequest() error {
 	return nil
 }
 
-func RunRBACTest(ctx framework.TestContext, cases []TestCase) {
+func RunRBACTest(t *testing.T, cases []TestCase) {
 	for _, tc := range cases {
 		want := "deny"
 		if tc.ExpectAllowed {
@@ -122,13 +114,8 @@ func RunRBACTest(ctx framework.TestContext, cases []TestCase) {
 			tc.Request.Options.PortName,
 			tc.Request.Options.Path,
 			want)
-		ctx.NewSubTest(testName).Run(func(ctx framework.TestContext) {
-			// Current source ip based authz test cases are not required in multicluster setup
-			// because cross-network traffic will lose the origin source ip info
-			if strings.Contains(testName, "source-ip") && ctx.Clusters().IsMulticluster() {
-				ctx.Skip()
-			}
-			retry.UntilSuccessOrFail(ctx, tc.CheckRBACRequest,
+		t.Run(testName, func(t *testing.T) {
+			retry.UntilSuccessOrFail(t, tc.CheckRBACRequest,
 				retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second))
 		})
 	}

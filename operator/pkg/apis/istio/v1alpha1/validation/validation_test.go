@@ -15,7 +15,6 @@
 package validation_test
 
 import (
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -23,12 +22,12 @@ import (
 	"github.com/gogo/protobuf/types"
 
 	v1alpha12 "istio.io/api/operator/v1alpha1"
+
 	"istio.io/istio/operator/pkg/apis/istio/v1alpha1"
 	"istio.io/istio/operator/pkg/apis/istio/v1alpha1/validation"
 	"istio.io/istio/operator/pkg/helm"
 	"istio.io/istio/operator/pkg/manifest"
 	"istio.io/istio/operator/pkg/util"
-	"istio.io/istio/operator/pkg/util/clog"
 	"istio.io/istio/pkg/test/env"
 )
 
@@ -55,9 +54,8 @@ func TestValidateConfig(t *testing.T) {
 					},
 				},
 			},
-			errors: `! values.grafana.enabled is deprecated; use the samples/addons/ deployments instead
-, ! addonComponents.grafana.enabled is deprecated; use the samples/addons/ deployments instead
-`,
+			warnings: `! values.grafana.enabled is deprecated; use the samples/addons/ deployments instead
+! addonComponents.grafana.enabled is deprecated; use the samples/addons/ deployments instead`,
 		},
 		{
 			name: "global",
@@ -69,6 +67,43 @@ func TestValidateConfig(t *testing.T) {
 				},
 			},
 			warnings: `! values.global.localityLbSetting is deprecated; use meshConfig.localityLbSetting instead`,
+		},
+		{
+			name: "mixer",
+			value: &v1alpha12.IstioOperatorSpec{
+				Values: map[string]interface{}{
+					"telemetry": map[string]interface{}{
+						"v1": map[string]interface{}{"enabled": true},
+					},
+				},
+				Components: &v1alpha12.IstioComponentSetSpec{
+					Telemetry: &v1alpha12.ComponentSpec{
+						Enabled: &v1alpha12.BoolValueForPB{BoolValue: types.BoolValue{Value: true}},
+					},
+				},
+			},
+			warnings: "! Values.telemetry.v1.enabled, Components.Telemetry.Enabled is deprecated." +
+				" Mixer is deprecated and will be removed from Istio with the 1.8 release." +
+				" Please consult our docs on the replacement.",
+		},
+		{
+			name: "default_mixer_settings",
+			value: &v1alpha12.IstioOperatorSpec{
+				Values: map[string]interface{}{
+					"telemetry": map[string]interface{}{
+						"v1": map[string]interface{}{"enabled": false},
+					},
+				},
+				Components: &v1alpha12.IstioComponentSetSpec{
+					Telemetry: &v1alpha12.ComponentSpec{
+						Enabled: &v1alpha12.BoolValueForPB{BoolValue: types.BoolValue{Value: false}},
+					},
+					Policy: &v1alpha12.ComponentSpec{
+						Enabled: &v1alpha12.BoolValueForPB{BoolValue: types.BoolValue{Value: false}},
+					},
+				},
+			},
+			warnings: "",
 		},
 		{
 			name: "unset target port",
@@ -224,14 +259,13 @@ func TestValidateProfiles(t *testing.T) {
 		// Just ensure we find some profiles, in case this code breaks
 		t.Fatalf("Maybe have failed getting profiles, got %v", profiles)
 	}
-	l := clog.NewConsoleLogger(os.Stdout, os.Stderr, nil)
 	for _, tt := range profiles {
 		t.Run(tt, func(t *testing.T) {
-			_, s, err := manifest.GenIOPFromProfile(tt, "", []string{"installPackagePath=" + manifests}, false, false, nil, l)
+			_, s, err := manifest.GenIOPSFromProfile(tt, "", []string{"installPackagePath=" + manifests}, false, false, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			verr, warnings := validation.ValidateConfig(false, s.Spec)
+			verr, warnings := validation.ValidateConfig(false, s)
 			if verr != nil {
 				t.Fatalf("got error validating: %v", verr)
 			}

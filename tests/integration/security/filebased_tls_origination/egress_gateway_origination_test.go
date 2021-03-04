@@ -1,4 +1,3 @@
-// +build integ
 //  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,18 +24,20 @@ import (
 	"testing"
 	"time"
 
+	"istio.io/istio/pkg/test/framework/components/istio"
+
+	"istio.io/istio/pkg/test/echo/common"
+	"istio.io/istio/pkg/test/framework/resource"
+
 	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 
 	"istio.io/istio/pkg/config/protocol"
-	"istio.io/istio/pkg/test/echo/common"
 	"istio.io/istio/pkg/test/echo/common/response"
 	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
-	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/namespace"
-	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/test/util/structpath"
 )
@@ -161,7 +162,7 @@ const (
 apiVersion: networking.istio.io/v1alpha3
 kind: DestinationRule
 metadata:
-  name: originate-tls-for-server-filebased-simple
+  name: originate-tls-for-server
 spec:
   host: "server.{{.AppNamespace}}.svc.cluster.local"
   trafficPolicy:
@@ -179,7 +180,7 @@ spec:
 apiVersion: networking.istio.io/v1alpha3
 kind: DestinationRule
 metadata:
-  name: originate-tls-for-server-filebased-disabled
+  name: originate-tls-for-server
 spec:
   host: "server.{{.AppNamespace}}.svc.cluster.local"
   trafficPolicy:
@@ -195,7 +196,7 @@ spec:
 apiVersion: networking.istio.io/v1alpha3
 kind: DestinationRule
 metadata:
-  name: originate-tls-for-server-filebased-mutual
+  name: originate-mtls-for-server
 spec:
   host: "server.{{.AppNamespace}}.svc.cluster.local"
   trafficPolicy:
@@ -256,7 +257,7 @@ func setupEcho(t *testing.T, ctx resource.Context) (echo.Instance, echo.Instance
 	})
 
 	var internalClient, externalServer echo.Instance
-	echoboot.NewBuilder(ctx).
+	echoboot.NewBuilderOrFail(t, ctx).
 		With(&internalClient, echo.Config{
 			Service:   "client",
 			Namespace: appsNamespace,
@@ -264,7 +265,6 @@ func setupEcho(t *testing.T, ctx resource.Context) (echo.Instance, echo.Instance
 			Subsets: []echo.SubsetConfig{{
 				Version: "v1",
 			}},
-			Cluster: ctx.Clusters().Default(),
 		}).
 		With(&externalServer, echo.Config{
 			Service:   "server",
@@ -299,7 +299,6 @@ func setupEcho(t *testing.T, ctx resource.Context) (echo.Instance, echo.Instance
 				Version:     "v1",
 				Annotations: echo.NewAnnotations().SetBool(echo.SidecarInject, false),
 			}},
-			Cluster: ctx.Clusters().Default(),
 		}).
 		BuildOrFail(t)
 
@@ -318,46 +317,37 @@ const (
 apiVersion: networking.istio.io/v1alpha3
 kind: Gateway
 metadata:
-  name: istio-egressgateway-filebased
+  name: istio-egressgateway
 spec:
   selector:
     istio: egressgateway
   servers:
     - port:
-        number: 443
-        name: https-filebased
-        protocol: HTTPS
+        number: 80
+        name: http-port-for-tls-origination
+        protocol: HTTP
       hosts:
         - server.{{.ServerNamespace}}.svc.cluster.local
-      tls:
-        mode: ISTIO_MUTUAL
 ---
 apiVersion: networking.istio.io/v1alpha3
 kind: DestinationRule
 metadata:
-  name: egressgateway-for-server-filebased
+  name: egressgateway-for-server
 spec:
   host: istio-egressgateway.istio-system.svc.cluster.local
   subsets:
   - name: server
-    trafficPolicy:
-      portLevelSettings:
-      - port:
-          number: 443
-        tls:
-          mode: ISTIO_MUTUAL
-          sni: server.{{.ServerNamespace}}.svc.cluster.local
 `
 	VirtualService = `
 apiVersion: networking.istio.io/v1alpha3
 kind: VirtualService
 metadata:
-  name: route-via-egressgateway-filebased
+  name: route-via-egressgateway
 spec:
   hosts:
     - server.{{.ServerNamespace}}.svc.cluster.local
   gateways:
-    - istio-egressgateway-filebased
+    - istio-egressgateway
     - mesh
   http:
     - match:
@@ -369,12 +359,12 @@ spec:
             host: istio-egressgateway.istio-system.svc.cluster.local
             subset: server
             port:
-              number: 443
+              number: 80
           weight: 100
     - match:
         - gateways:
-            - istio-egressgateway-filebased
-          port: 443
+            - istio-egressgateway
+          port: 80
       route:
         - destination:
             host: server.{{.ServerNamespace}}.svc.cluster.local

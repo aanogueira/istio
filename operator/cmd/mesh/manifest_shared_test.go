@@ -37,6 +37,7 @@ import (
 	"istio.io/istio/operator/pkg/manifest"
 	"istio.io/istio/operator/pkg/name"
 	"istio.io/istio/operator/pkg/object"
+	"istio.io/istio/operator/pkg/translate"
 	"istio.io/istio/operator/pkg/util"
 	"istio.io/istio/operator/pkg/util/clog"
 	"istio.io/pkg/log"
@@ -196,7 +197,7 @@ func fakeApplyExtraResources(inFile string) error {
 
 func fakeControllerReconcile(inFile string, chartSource chartSourceType) (*ObjectSet, error) {
 	l := clog.NewDefaultLogger()
-	_, iop, err := manifest.GenerateConfig(
+	_, iops, err := manifest.GenerateConfig(
 		[]string{inFileAbsolutePath(inFile)},
 		[]string{"installPackagePath=" + string(chartSource)},
 		false, testRestConfig, l)
@@ -204,6 +205,14 @@ func fakeControllerReconcile(inFile string, chartSource chartSourceType) (*Objec
 		return nil, err
 	}
 
+	crName := installedSpecCRPrefix
+	if iops.Revision != "" {
+		crName += "-" + iops.Revision
+	}
+	iop, err := translate.IOPStoIOP(iops, crName, v1alpha1.Namespace(iops))
+	if err != nil {
+		return nil, err
+	}
 	iop.Spec.InstallPackagePath = string(chartSource)
 
 	if err := createNamespace(testK8Interface, iop.Namespace); err != nil {

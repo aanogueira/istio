@@ -15,7 +15,6 @@
 package resource
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 
@@ -23,7 +22,6 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/validation"
 )
@@ -33,7 +31,7 @@ type Schema interface {
 	fmt.Stringer
 
 	// GroupVersionKind of the resource. This is the only way to uniquely identify a resource.
-	GroupVersionKind() config.GroupVersionKind
+	GroupVersionKind() GroupVersionKind
 
 	// GroupVersionResource of the resource.
 	GroupVersionResource() schema.GroupVersionResource
@@ -62,29 +60,37 @@ type Schema interface {
 	// ProtoPackage returns the golang package for the protobuf resource.
 	ProtoPackage() string
 
-	// NewInstance returns a new instance of the protocol buffer message for this resource.
-	NewInstance() (config.Spec, error)
+	// NewProtoInstance returns a new instance of the protocol buffer message for this resource.
+	NewProtoInstance() (proto.Message, error)
 
-	// Status returns the associated status of the schema
-	Status() (config.Status, error)
-
-	StatusKind() string
-
-	StatusPackage() string
-
-	// MustNewInstance calls NewInstance and panics if an error occurs.
-	MustNewInstance() config.Spec
+	// MustNewProtoInstance calls NewProtoInstance and panics if an error occurs.
+	MustNewProtoInstance() proto.Message
 
 	// Validate this schema.
 	Validate() error
 
-	// ValidateConfig validates that the given config message is of the correct type for this schema
+	// ValidateProto validates that the given protocol buffer message is of the correct type for this schema
 	// and that the contents are valid.
-	ValidateConfig(cfg config.Config) (validation.Warning, error)
+	ValidateProto(name, namespace string, config proto.Message) error
 
 	// Equal is a helper function for testing equality between Schema instances. This supports comparison
 	// with the cmp library.
 	Equal(other Schema) bool
+}
+
+type GroupVersionKind struct {
+	Group   string `json:"group"`
+	Version string `json:"version"`
+	Kind    string `json:"kind"`
+}
+
+var _ fmt.Stringer = GroupVersionKind{}
+
+func (g GroupVersionKind) String() string {
+	if g.Group == "" {
+		return "core/" + g.Version + "/" + g.Kind
+	}
+	return g.Group + "/" + g.Version + "/" + g.Kind
 }
 
 // Builder for a Schema.
@@ -107,19 +113,8 @@ type Builder struct {
 	// Proto refers to the protobuf message type name corresponding to the type
 	Proto string
 
-	StatusProto string
-
-	// ReflectType is the type of the go struct
-	ReflectType reflect.Type
-
-	// StatusType is the type of the associated status.
-	StatusType reflect.Type
-
 	// ProtoPackage refers to the name of golang package for the protobuf message.
 	ProtoPackage string
-
-	// StatusPackage refers to the name of the golang status package.
-	StatusPackage string
 
 	// ValidateProto performs validation on protobuf messages based on this schema.
 	ValidateProto validation.ValidateFunc
@@ -154,36 +149,30 @@ func (b Builder) BuildNoValidate() Schema {
 
 	return &schemaImpl{
 		clusterScoped: b.ClusterScoped,
-		gvk: config.GroupVersionKind{
+		gvk: GroupVersionKind{
 			Group:   b.Group,
 			Version: b.Version,
 			Kind:    b.Kind,
 		},
-		plural:         b.Plural,
-		apiVersion:     b.Group + "/" + b.Version,
-		proto:          b.Proto,
-		goPackage:      b.ProtoPackage,
-		reflectType:    b.ReflectType,
-		validateConfig: b.ValidateProto,
-		statusType:     b.StatusType,
-		statusPackage:  b.StatusPackage,
+		plural:        b.Plural,
+		apiVersion:    b.Group + "/" + b.Version,
+		proto:         b.Proto,
+		protoPackage:  b.ProtoPackage,
+		validateProto: b.ValidateProto,
 	}
 }
 
 type schemaImpl struct {
-	clusterScoped  bool
-	gvk            config.GroupVersionKind
-	plural         string
-	apiVersion     string
-	proto          string
-	goPackage      string
-	validateConfig validation.ValidateFunc
-	reflectType    reflect.Type
-	statusType     reflect.Type
-	statusPackage  string
+	clusterScoped bool
+	gvk           GroupVersionKind
+	plural        string
+	apiVersion    string
+	proto         string
+	protoPackage  string
+	validateProto validation.ValidateFunc
 }
 
-func (s *schemaImpl) GroupVersionKind() config.GroupVersionKind {
+func (s *schemaImpl) GroupVersionKind() GroupVersionKind {
 	return s.gvk
 }
 
@@ -224,11 +213,7 @@ func (s *schemaImpl) Proto() string {
 }
 
 func (s *schemaImpl) ProtoPackage() string {
-	return s.goPackage
-}
-
-func (s *schemaImpl) StatusPackage() string {
-	return s.statusPackage
+	return s.protoPackage
 }
 
 func (s *schemaImpl) Validate() (err error) {
@@ -238,62 +223,43 @@ func (s *schemaImpl) Validate() (err error) {
 	if !labels.IsDNS1123Label(s.plural) {
 		err = multierror.Append(err, fmt.Errorf("invalid plural for kind %s: %s", s.Kind(), s.plural))
 	}
-	if s.reflectType == nil && getProtoMessageType(s.proto) == nil {
-		err = multierror.Append(err, fmt.Errorf("proto message or reflect type not found: %v", s.proto))
+	if getProtoMessageType(s.proto) == nil {
+		err = multierror.Append(err, fmt.Errorf("proto message not found: %v", s.proto))
 	}
 	return
 }
 
 func (s *schemaImpl) String() string {
-	return fmt.Sprintf("[Schema](%s, %q, %s)", s.Kind(), s.goPackage, s.proto)
+	return fmt.Sprintf("[Schema](%s, %q, %s)", s.Kind(), s.protoPackage, s.proto)
 }
 
-func (s *schemaImpl) NewInstance() (config.Spec, error) {
-	rt := s.reflectType
-	if rt == nil {
-		rt = getProtoMessageType(s.proto)
+func (s *schemaImpl) NewProtoInstance() (proto.Message, error) {
+	goType := getProtoMessageType(s.proto)
+	if goType == nil {
+		return nil, fmt.Errorf("message not found: %q", s.proto)
 	}
-	if rt == nil {
-		return nil, errors.New("failed to find reflect type")
-	}
-	instance := reflect.New(rt).Interface()
 
-	p, ok := instance.(config.Spec)
+	instance := reflect.New(goType).Interface()
+
+	p, ok := instance.(proto.Message)
 	if !ok {
 		return nil, fmt.Errorf(
-			"newInstance: message is not an instance of config.Spec. kind:%s, type:%v, value:%v",
-			s.Kind(), rt, instance)
+			"newProtoInstance: message is not an instance of proto.Message. kind:%s, type:%v, value:%v",
+			s.Kind(), goType, instance)
 	}
 	return p, nil
 }
 
-func (s *schemaImpl) Status() (config.Status, error) {
-	statTyp := s.statusType
-	if statTyp == nil {
-		return nil, errors.New("unknown status type")
-	}
-	instance := reflect.New(statTyp).Interface()
-	p, ok := instance.(config.Status)
-	if !ok {
-		return nil, fmt.Errorf("status: statusType not an instance of config.Status. type: %v, value: %v", statTyp, instance)
-	}
-	return p, nil
-}
-
-func (s *schemaImpl) StatusKind() string {
-	return s.statusType.Name()
-}
-
-func (s *schemaImpl) MustNewInstance() config.Spec {
-	p, err := s.NewInstance()
+func (s *schemaImpl) MustNewProtoInstance() proto.Message {
+	p, err := s.NewProtoInstance()
 	if err != nil {
 		panic(err)
 	}
 	return p
 }
 
-func (s *schemaImpl) ValidateConfig(cfg config.Config) (validation.Warning, error) {
-	return s.validateConfig(cfg)
+func (s *schemaImpl) ValidateProto(name, namespace string, config proto.Message) error {
+	return s.validateProto(name, namespace, config)
 }
 
 func (s *schemaImpl) Equal(o Schema) bool {
@@ -307,8 +273,8 @@ func (s *schemaImpl) Equal(o Schema) bool {
 }
 
 // FromKubernetesGVK converts a Kubernetes GVK to an Istio GVK
-func FromKubernetesGVK(in *schema.GroupVersionKind) config.GroupVersionKind {
-	return config.GroupVersionKind{
+func FromKubernetesGVK(in *schema.GroupVersionKind) GroupVersionKind {
+	return GroupVersionKind{
 		Group:   in.Group,
 		Version: in.Version,
 		Kind:    in.Kind,

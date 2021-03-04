@@ -40,10 +40,6 @@ func (o origin) Reference() resource.Reference {
 	return defaultReference
 }
 
-func (o origin) FieldMap() map[string]int {
-	return make(map[string]int)
-}
-
 type reference string
 
 func (r reference) String() string {

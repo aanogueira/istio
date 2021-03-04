@@ -18,11 +18,11 @@ import (
 	"fmt"
 	"strings"
 
-	rbacpb "github.com/envoyproxy/go-control-plane/envoy/config/rbac/v3"
-
 	"istio.io/istio/pilot/pkg/security/authz/matcher"
 	sm "istio.io/istio/pilot/pkg/security/model"
 	"istio.io/istio/pkg/spiffe"
+
+	rbacpb "github.com/envoyproxy/go-control-plane/envoy/config/rbac/v3"
 )
 
 type generator interface {
@@ -105,22 +105,7 @@ func (srcIPGenerator) principal(_, value string, _ bool) (*rbacpb.Principal, err
 	if err != nil {
 		return nil, err
 	}
-	return principalDirectRemoteIP(cidr), nil
-}
-
-type remoteIPGenerator struct {
-}
-
-func (remoteIPGenerator) permission(_, _ string, _ bool) (*rbacpb.Permission, error) {
-	return nil, fmt.Errorf("unimplemented")
-}
-
-func (remoteIPGenerator) principal(_, value string, _ bool) (*rbacpb.Principal, error) {
-	cidr, err := matcher.CidrRange(value)
-	if err != nil {
-		return nil, err
-	}
-	return principalRemoteIP(cidr), nil
+	return principalSourceIP(cidr), nil
 }
 
 type srcNamespaceGenerator struct {
@@ -228,13 +213,13 @@ func (requestClaimGenerator) principal(key, value string, forTCP bool) (*rbacpb.
 		return nil, fmt.Errorf("%s must not be used in TCP", key)
 	}
 
-	claims, err := extractNameInNestedBrackets(strings.TrimPrefix(key, attrRequestClaims))
+	claim, err := extractNameInBrackets(strings.TrimPrefix(key, attrRequestClaims))
 	if err != nil {
 		return nil, err
 	}
 	// Generate a metadata list matcher for the given path keys and value.
 	// On proxy side, the value should be of list type.
-	m := matcher.MetadataListMatcher(sm.AuthnFilterName, append([]string{attrRequestClaims}, claims...), value)
+	m := matcher.MetadataListMatcher(sm.AuthnFilterName, []string{attrRequestClaims, claim}, value)
 	return principalMetadata(m), nil
 }
 

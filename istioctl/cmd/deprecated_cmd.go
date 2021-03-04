@@ -18,6 +18,7 @@ package cmd
 
 import (
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
+
 	kubecfg "istio.io/istio/pkg/kube"
 )
 

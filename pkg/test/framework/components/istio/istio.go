@@ -15,11 +15,8 @@
 package istio
 
 import (
-	"net"
-
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework/components/environment/kube"
-	"istio.io/istio/pkg/test/framework/components/istio/ingress"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/scopes"
 )
@@ -28,23 +25,11 @@ import (
 type Instance interface {
 	resource.Resource
 
-	// IngressFor returns an ingress used for reaching workloads in the given cluster.
-	// The ingress's service name will be "istio-ingressgateway" and the istio label will be "ingressgateway".
-	IngressFor(cluster resource.Cluster) ingress.Instance
-	// CustomIngressFor returns an ingress with a specific service name and "istio" label used for reaching workloads
-	// in the given cluster.
-	CustomIngressFor(cluster resource.Cluster, serviceName, istioLabel string) ingress.Instance
-
-	// RemoteDiscoveryAddressFor returns the external address of the discovery server that controls
-	// the given cluster. This allows access to the discovery server from
-	// outside its cluster.
-	RemoteDiscoveryAddressFor(cluster resource.Cluster) (net.TCPAddr, error)
-
 	Settings() Config
 }
 
 // SetupConfigFn is a setup function that specifies the overrides of the configuration to deploy Istio.
-type SetupConfigFn func(ctx resource.Context, cfg *Config)
+type SetupConfigFn func(cfg *Config)
 
 // SetupContextFn is a setup function that uses Context for configuration.
 type SetupContextFn func(ctx resource.Context) error
@@ -75,7 +60,7 @@ func Setup(i *Instance, cfn SetupConfigFn, ctxFns ...SetupContextFn) resource.Se
 			return err
 		}
 		if cfn != nil {
-			cfn(ctx, &cfg)
+			cfn(&cfg)
 		}
 		for _, ctxFn := range ctxFns {
 			if ctxFn != nil {

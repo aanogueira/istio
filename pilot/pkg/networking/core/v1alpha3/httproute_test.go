@@ -24,11 +24,11 @@ import (
 
 	meshapi "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/plugin"
 	"istio.io/istio/pilot/pkg/serviceregistry"
-	"istio.io/istio/pilot/test/xdstest"
-	"istio.io/istio/pkg/config"
+	"istio.io/istio/pilot/pkg/util/sets"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/collections"
@@ -84,7 +84,7 @@ func TestGenerateVirtualHostDomains(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		out := generateVirtualHostDomains(c.service, c.port, c.node, model.NewPushContext())
+		out := generateVirtualHostDomains(c.service, c.port, c.node)
 		sort.SliceStable(c.want, func(i, j int) bool { return c.want[i] < c.want[j] })
 		sort.SliceStable(out, func(i, j int) bool { return out[i] < out[j] })
 		if !reflect.DeepEqual(out, c.want) {
@@ -113,8 +113,8 @@ func TestSidecarOutboundHTTPRouteConfigWithDuplicateHosts(t *testing.T) {
 		},
 	}
 
-	virtualService6 := config.Config{
-		Meta: config.Meta{
+	virtualService6 := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 			Name:             "acme-v3",
 			Namespace:        "not-default",
@@ -122,9 +122,9 @@ func TestSidecarOutboundHTTPRouteConfigWithDuplicateHosts(t *testing.T) {
 		Spec: virtualServiceSpec6,
 	}
 
-	virtualServices := []*config.Config{&virtualService6}
+	virtualServices := []*model.Config{&virtualService6}
 	p := &fakePlugin{}
-	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
 
 	env := buildListenerEnvWithVirtualServices(services, virtualServices)
 
@@ -148,13 +148,27 @@ func TestSidecarOutboundHTTPRouteConfigWithDuplicateHosts(t *testing.T) {
 	vHostCache := make(map[int][]*route.VirtualHost)
 	routeName := "7443"
 	routeCfg := configgen.buildSidecarOutboundHTTPRouteConfig(&proxy, env.PushContext, "7443", vHostCache)
-	xdstest.ValidateRouteConfiguration(t, routeCfg)
 	if routeCfg == nil {
 		t.Fatalf("got nil route for %s", routeName)
 	}
 
 	if len(routeCfg.VirtualHosts) != 3 {
 		t.Fatalf("unexpected virtual hosts %v", routeCfg.VirtualHosts)
+	}
+
+	vhosts := sets.Set{}
+	domains := sets.Set{}
+	for _, vhost := range routeCfg.VirtualHosts {
+		if vhosts.Contains(vhost.Name) {
+			t.Fatalf("duplicate virtual host found %s", vhost.Name)
+		}
+		vhosts.Insert(vhost.Name)
+		for _, domain := range vhost.Domains {
+			if domains.Contains(domain) {
+				t.Fatalf("duplicate virtual host domain found %s", domain)
+			}
+			domains.Insert(domain)
+		}
 	}
 }
 
@@ -168,8 +182,8 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 		buildHTTPService("test-headless.com", visibility.Public, wildcardIP, "not-default", 8888),
 	}
 
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -221,8 +235,8 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			},
 		},
 	}
-	sidecarConfigWithWildcard := &config.Config{
-		Meta: config.Meta{
+	sidecarConfigWithWildcard := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -239,8 +253,8 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			},
 		},
 	}
-	sidecarConfigWitHTTPProxy := &config.Config{
-		Meta: config.Meta{
+	sidecarConfigWitHTTPProxy := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -257,8 +271,8 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			},
 		},
 	}
-	sidecarConfigWithRegistryOnly := &config.Config{
-		Meta: config.Meta{
+	sidecarConfigWithRegistryOnly := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -311,8 +325,8 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			},
 		},
 	}
-	sidecarConfigWithAllowAny := &config.Config{
-		Meta: config.Meta{
+	sidecarConfigWithAllowAny := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -450,40 +464,40 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			},
 		},
 	}
-	virtualService1 := config.Config{
-		Meta: config.Meta{
+	virtualService1 := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 			Name:             "acme2-v1",
 			Namespace:        "not-default",
 		},
 		Spec: virtualServiceSpec1,
 	}
-	virtualService2 := config.Config{
-		Meta: config.Meta{
+	virtualService2 := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 			Name:             "acme-v2",
 			Namespace:        "not-default",
 		},
 		Spec: virtualServiceSpec2,
 	}
-	virtualService3 := config.Config{
-		Meta: config.Meta{
+	virtualService3 := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 			Name:             "acme-v3",
 			Namespace:        "not-default",
 		},
 		Spec: virtualServiceSpec3,
 	}
-	virtualService4 := config.Config{
-		Meta: config.Meta{
+	virtualService4 := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 			Name:             "acme-v4",
 			Namespace:        "not-default",
 		},
 		Spec: virtualServiceSpec4,
 	}
-	virtualService5 := config.Config{
-		Meta: config.Meta{
+	virtualService5 := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 			Name:             "acme-v3",
 			Namespace:        "not-default",
@@ -507,8 +521,8 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 	cases := []struct {
 		name                  string
 		routeName             string
-		sidecarConfig         *config.Config
-		virtualServiceConfigs []*config.Config
+		sidecarConfig         *model.Config
+		virtualServiceConfigs []*model.Config
 		// virtualHost Name and domains
 		expectedHosts map[string]map[string]bool
 		registryOnly  bool
@@ -734,7 +748,7 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			name:                  "no sidecar config with virtual services with duplicate entries",
 			routeName:             "60",
 			sidecarConfig:         nil,
-			virtualServiceConfigs: []*config.Config{&virtualService1, &virtualService2},
+			virtualServiceConfigs: []*model.Config{&virtualService1, &virtualService2},
 			expectedHosts: map[string]map[string]bool{
 				"test-private-2.com:60": {
 					"test-private-2.com": true, "test-private-2.com:60": true, "9.9.9.10": true, "9.9.9.10:60": true,
@@ -749,7 +763,7 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			name:                  "no sidecar config with virtual services with no service in registry",
 			routeName:             "80", // no service for the host in registry; use port 80 by default
 			sidecarConfig:         nil,
-			virtualServiceConfigs: []*config.Config{&virtualService3},
+			virtualServiceConfigs: []*model.Config{&virtualService3},
 			expectedHosts: map[string]map[string]bool{
 				"test-private.com:80": {
 					"test-private.com": true, "test-private.com:80": true, "9.9.9.9": true, "9.9.9.9:80": true,
@@ -782,7 +796,7 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			name:                  "no sidecar config with virtual services - import headless service from other namespaces: 8888",
 			routeName:             "8888",
 			sidecarConfig:         nil,
-			virtualServiceConfigs: []*config.Config{&virtualService4},
+			virtualServiceConfigs: []*model.Config{&virtualService4},
 			expectedHosts: map[string]map[string]bool{
 				"test-headless.com:8888": {
 					"test-headless.com": true, "test-headless.com:8888": true, "*.test-headless.com": true, "*.test-headless.com:8888": true,
@@ -825,7 +839,7 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			name:                  "wild card sidecar config, with non matching virtual service",
 			routeName:             "7443",
 			sidecarConfig:         sidecarConfigWithWildcard,
-			virtualServiceConfigs: []*config.Config{&virtualService5},
+			virtualServiceConfigs: []*model.Config{&virtualService5},
 			expectedHosts: map[string]map[string]bool{
 				"block_all": {
 					"*": true,
@@ -837,7 +851,7 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 			name:                  "http proxy sidecar config, with non matching virtual service",
 			routeName:             "7443",
 			sidecarConfig:         sidecarConfigWitHTTPProxy,
-			virtualServiceConfigs: []*config.Config{&virtualService5},
+			virtualServiceConfigs: []*model.Config{&virtualService5},
 			expectedHosts: map[string]map[string]bool{
 				"bookinfo.com:9999":      {"bookinfo.com:9999": true, "*.bookinfo.com:9999": true},
 				"bookinfo.com:70":        {"bookinfo.com:70": true, "*.bookinfo.com:70": true},
@@ -874,11 +888,11 @@ func TestSidecarOutboundHTTPRouteConfig(t *testing.T) {
 }
 
 func testSidecarRDSVHosts(t *testing.T, services []*model.Service,
-	sidecarConfig *config.Config, virtualServices []*config.Config, routeName string,
+	sidecarConfig *model.Config, virtualServices []*model.Config, routeName string,
 	expectedHosts map[string]map[string]bool, registryOnly bool) {
 	t.Helper()
 	p := &fakePlugin{}
-	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
 
 	env := buildListenerEnvWithVirtualServices(services, virtualServices)
 
@@ -897,7 +911,6 @@ func testSidecarRDSVHosts(t *testing.T, services []*model.Service,
 
 	vHostCache := make(map[int][]*route.VirtualHost)
 	routeCfg := configgen.buildSidecarOutboundHTTPRouteConfig(proxy, env.PushContext, routeName, vHostCache)
-	xdstest.ValidateRouteConfiguration(t, routeCfg)
 	if routeCfg == nil {
 		t.Fatalf("got nil route for %s", routeName)
 	}

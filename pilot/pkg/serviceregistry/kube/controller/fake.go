@@ -75,16 +75,15 @@ func NewFakeXDS() *FakeXdsUpdater {
 	}
 }
 
-func (fx *FakeXdsUpdater) EDSUpdate(_, hostname string, _ string, entry []*model.IstioEndpoint) {
+func (fx *FakeXdsUpdater) EDSUpdate(_, hostname string, _ string, entry []*model.IstioEndpoint) error {
 	if len(entry) > 0 {
 		select {
 		case fx.Events <- FakeXdsEvent{Type: "eds", ID: hostname, Endpoints: entry}:
 		default:
 		}
-	}
-}
 
-func (fx *FakeXdsUpdater) EDSCacheUpdate(_, _, _ string, entry []*model.IstioEndpoint) {
+	}
+	return nil
 }
 
 // SvcUpdate is called when a service port mapping definition is updated.
@@ -128,6 +127,7 @@ type FakeControllerOptions struct {
 	Client            kubelib.Client
 	NetworksWatcher   mesh.NetworksWatcher
 	ServiceHandler    func(service *model.Service, event model.Event)
+	InstanceHandler   func(instance *model.ServiceInstance, event model.Event)
 	Mode              EndpointMode
 	ClusterID         string
 	WatchedNamespaces string
@@ -152,18 +152,20 @@ func NewFakeControllerWithOptions(opts FakeControllerOptions) (*FakeController, 
 	if opts.Client == nil {
 		opts.Client = kubelib.NewFakeClient()
 	}
-
 	options := Options{
 		WatchedNamespaces: opts.WatchedNamespaces, // default is all namespaces
+		ResyncPeriod:      1 * time.Second,
 		DomainSuffix:      domainSuffix,
 		XDSUpdater:        xdsUpdater,
 		Metrics:           &model.Environment{},
 		NetworksWatcher:   opts.NetworksWatcher,
 		EndpointMode:      opts.Mode,
 		ClusterID:         opts.ClusterID,
-		SyncInterval:      time.Microsecond,
 	}
 	c := NewController(opts.Client, options)
+	if opts.InstanceHandler != nil {
+		_ = c.AppendInstanceHandler(opts.InstanceHandler)
+	}
 	if opts.ServiceHandler != nil {
 		_ = c.AppendServiceHandler(opts.ServiceHandler)
 	}
@@ -179,6 +181,5 @@ func NewFakeControllerWithOptions(opts FakeControllerOptions) (*FakeController, 
 	if x, ok := xdsUpdater.(*FakeXdsUpdater); ok {
 		fx = x
 	}
-
 	return &FakeController{c}, fx
 }

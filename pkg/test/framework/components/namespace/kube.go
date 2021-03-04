@@ -26,6 +26,9 @@ import (
 	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"istio.io/api/label"
+
+	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/resource"
 	kube2 "istio.io/istio/pkg/test/kube"
 	"istio.io/istio/pkg/test/scopes"
@@ -44,16 +47,18 @@ type kubeNamespace struct {
 	ctx  resource.Context
 }
 
-func (n *kubeNamespace) Dump(ctx resource.Context) {
+func (n *kubeNamespace) Dump() {
 	scopes.Framework.Errorf("=== Dumping Namespace %s State...", n.name)
 
-	d, err := ctx.CreateTmpDirectory(n.name + "-state")
+	d, err := n.ctx.CreateTmpDirectory(n.name + "-state")
 	if err != nil {
 		scopes.Framework.Errorf("Unable to create directory for dumping %s contents: %v", n.name, err)
 		return
 	}
 
-	kube2.DumpPods(n.ctx, d, n.name)
+	for _, cluster := range n.ctx.Clusters() {
+		kube2.DumpPods(cluster, d, n.name)
+	}
 }
 
 var _ Instance = &kubeNamespace{}
@@ -85,20 +90,31 @@ func (n *kubeNamespace) Close() (err error) {
 	return
 }
 
-func claimKube(ctx resource.Context, nsConfig *Config) (Instance, error) {
-	for _, cluster := range ctx.Clusters() {
-		if !kube2.NamespaceExists(cluster, nsConfig.Prefix) {
+func claimKube(ctx resource.Context, name string, injectSidecar bool) (Instance, error) {
+	env := ctx.Environment().(*kube.Environment)
+	cfg, err := istio.DefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, cluster := range env.KubeClusters {
+		if !kube2.NamespaceExists(cluster, name) {
+			nsConfig := Config{
+				Inject:   injectSidecar,
+				Revision: cfg.CustomSidecarInjectorNamespace,
+			}
+
 			if _, err := cluster.CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
 				ObjectMeta: kubeApiMeta.ObjectMeta{
-					Name:   nsConfig.Prefix,
-					Labels: createNamespaceLabels(nsConfig),
+					Name:   name,
+					Labels: createNamespaceLabels(&nsConfig),
 				},
 			}, kubeApiMeta.CreateOptions{}); err != nil {
 				return nil, err
 			}
 		}
 	}
-	return &kubeNamespace{name: nsConfig.Prefix}, nil
+	return &kubeNamespace{name: name}, nil
 }
 
 // NewNamespace allocates a new testing namespace.

@@ -24,6 +24,8 @@ import (
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 
 	"istio.io/istio/pkg/kube"
 )
@@ -82,7 +84,7 @@ func Test_SecretController(t *testing.T) {
 	BuildClientsFromConfig = func(kubeConfig []byte) (kube.Client, error) {
 		return kube.NewFakeClient(), nil
 	}
-	clientset := kube.NewFakeClient()
+	clientset := fake.NewSimpleClientset()
 
 	var (
 		secret0                        = makeSecret("s0", "c0", []byte("kubeconfig0-0"))
@@ -113,12 +115,8 @@ func Test_SecretController(t *testing.T) {
 
 	// Start the secret controller and sleep to allow secret process to start.
 	stopCh := make(chan struct{})
-	t.Cleanup(func() {
-		close(stopCh)
-	})
-	c := StartSecretController(clientset, addCallback, updateCallback, deleteCallback, secretNamespace, time.Microsecond)
-	kube.WaitForCacheSyncInterval(stopCh, time.Microsecond, c.informer.HasSynced)
-	clientset.RunAndWait(stopCh)
+	c := StartSecretController(clientset, addCallback, updateCallback, deleteCallback, secretNamespace)
+	cache.WaitForCacheSync(stopCh, c.informer.HasSynced)
 
 	for i, step := range steps {
 		resetCallbackData()

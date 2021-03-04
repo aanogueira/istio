@@ -44,28 +44,11 @@ func FillInDefaults(ctx resource.Context, defaultDomain string, c *echo.Config) 
 		c.Domain = defaultDomain
 	}
 
-	// Convert legacy config to workload oritended.
-	if c.Subsets == nil {
-		c.Subsets = []echo.SubsetConfig{
-			{
-				Version: c.Version,
-			},
-		}
-	}
-
-	for i := range c.Subsets {
-		if c.Subsets[i].Version == "" {
-			c.Subsets[i].Version = c.Version
-		}
-	}
-
 	// Fill in the default cluster.
-	if ctx != nil {
-		c.Cluster = ctx.Clusters().GetOrDefault(c.Cluster)
-	}
+	c.Cluster = ctx.Clusters().GetOrDefault(c.Cluster)
 
 	// If no namespace was provided, use the default.
-	if c.Namespace == nil && ctx != nil {
+	if c.Namespace == nil {
 		nsConfig := namespace.Config{
 			Prefix: defaultNamespace,
 			Inject: true,

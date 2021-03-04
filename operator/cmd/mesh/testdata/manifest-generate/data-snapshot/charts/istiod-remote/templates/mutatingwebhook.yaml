@@ -16,8 +16,8 @@ webhooks:
   - name: sidecar-injector.istio.io
     clientConfig:
       {{- if .Values.istiodRemote.injectionURL }}
-      # the url supports to use inject/cluster/x/net/y format
-      url: {{ .Values.istiodRemote.injectionURL }}
+      # the url doesn't take query params, so use inject/cluster/x/net/y format
+      url: {{ .Values.istiodRemote.injectionURL }}/cluster/{{ .Values.global.multiCluster.clusterName | default "remote0" }}/net/{{ .Values.global.network | default "network0" }}
       {{- else }}
       service:
         name: istiod
@@ -25,14 +25,14 @@ webhooks:
         path: "/inject"
       {{- end }}
       caBundle: {{ .Values.sidecarInjectorWebhook.caBundle }}
+    sideEffects: None
+    admissionReviewVersions: ["v1beta1", "v1"]
     rules:
       - operations: [ "CREATE" ]
         apiGroups: [""]
         apiVersions: ["v1"]
         resources: ["pods"]
     failurePolicy: Fail
-    admissionReviewVersions: ["v1beta1", "v1"]
-    sideEffects: None
     namespaceSelector:
 {{- if .Values.sidecarInjectorWebhook.enableNamespacesByDefault }}
       matchExpressions:
@@ -68,14 +68,6 @@ webhooks:
         operator: NotIn
         values:
         - "false"
-{{- else if .Values.revision }}
-      matchExpressions:
-      - key: "sidecar.istio.io/inject"
-        operator: DoesNotExist
-      - key: istio.io/rev
-        operator: In
-        values:
-        - {{ .Values.revision }}
 {{- else }}
       matchLabels:
         "sidecar.istio.io/inject": "true"

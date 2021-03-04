@@ -15,6 +15,8 @@
 package components
 
 import (
+	"istio.io/pkg/log"
+
 	"istio.io/istio/galley/pkg/config/analysis/analyzers"
 	"istio.io/istio/galley/pkg/config/processing"
 	"istio.io/istio/galley/pkg/config/processing/snapshotter"
@@ -31,7 +33,6 @@ import (
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/mcp/monitoring"
 	"istio.io/istio/pkg/mcp/snapshot"
-	"istio.io/pkg/log"
 )
 
 // Processing component is the main config processing component that will listen to a config source and publish

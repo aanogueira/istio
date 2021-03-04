@@ -21,25 +21,27 @@ import (
 	"io/ioutil"
 	"time"
 
-	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	authapi "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	sds "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	"github.com/golang/protobuf/ptypes"
+
+	"istio.io/pkg/log"
+
+	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
+	authapi "github.com/envoyproxy/go-control-plane/envoy/api/v2/auth"
+	core "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
+	sds "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
 	authn_model "istio.io/istio/pilot/pkg/security/model"
 	sdscache "istio.io/istio/security/pkg/nodeagent/cache"
 	agent_sds "istio.io/istio/security/pkg/nodeagent/sds"
-	"istio.io/pkg/log"
 )
 
 // Client is a lightweight client for testing secret discovery service server.
 type Client struct {
 	stream        sds.SecretDiscoveryService_StreamSecretsClient
 	conn          *grpc.ClientConn
-	updateChan    chan *discovery.DiscoveryResponse
+	updateChan    chan *xdsapi.DiscoveryResponse
 	serverAddress string
 }
 
@@ -81,7 +83,7 @@ func NewClient(opt ClientOptions) (*Client, error) {
 	return &Client{
 		stream:        stream,
 		conn:          conn,
-		updateChan:    make(chan *discovery.DiscoveryResponse, 1),
+		updateChan:    make(chan *xdsapi.DiscoveryResponse, 1),
 		serverAddress: opt.ServerAddress,
 	}, nil
 }
@@ -111,7 +113,7 @@ func (c *Client) Stop() error {
 }
 
 // WaitForUpdate blocks until the error occurs or updates are pushed from the sds server.
-func (c *Client) WaitForUpdate(duration time.Duration) (*discovery.DiscoveryResponse, error) {
+func (c *Client) WaitForUpdate(duration time.Duration) (*xdsapi.DiscoveryResponse, error) {
 	t := time.NewTimer(duration)
 	for {
 		select {
@@ -128,7 +130,7 @@ func (c *Client) Send() error {
 	// TODO(incfly): just a place holder, need to follow xDS protocol.
 	// - Initial request version is empty.
 	// - Version & Nonce is needed for ack/rejecting.
-	return c.stream.Send(&discovery.DiscoveryRequest{
+	return c.stream.Send(&xdsapi.DiscoveryRequest{
 		VersionInfo: "",
 		Node: &core.Node{
 			Id: "sidecar~127.0.0.1~id2~local",
@@ -142,7 +144,7 @@ func (c *Client) Send() error {
 
 // ValidateResponse validates the SDS response.
 // TODO(incfly): add more check around cert.
-func ValidateResponse(response *discovery.DiscoveryResponse) error {
+func ValidateResponse(response *xdsapi.DiscoveryResponse) error {
 	if response == nil {
 		return fmt.Errorf("discoveryResponse is empty")
 	}

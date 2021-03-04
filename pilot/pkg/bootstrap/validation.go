@@ -17,12 +17,14 @@ package bootstrap
 import (
 	"strings"
 
+	"istio.io/pkg/env"
+	"istio.io/pkg/log"
+
+	"istio.io/istio/mixer/pkg/validate"
 	"istio.io/istio/pilot/pkg/leaderelection"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/webhooks/validation/controller"
 	"istio.io/istio/pkg/webhooks/validation/server"
-	"istio.io/pkg/env"
-	"istio.io/pkg/log"
 )
 
 var (
@@ -32,9 +34,7 @@ var (
 	validationWebhookConfigNameTemplate = "istiod-" + validationWebhookConfigNameTemplateVar
 
 	validationWebhookConfigName = env.RegisterStringVar("VALIDATION_WEBHOOK_CONFIG_NAME", validationWebhookConfigNameTemplate,
-		"Name of validatingwebhookconfiguration to patch. Empty will skip using cluster admin to patch.")
-
-	validationEnabled = env.RegisterBoolVar("VALIDATION_ENABLED", true, "Enable config validation handler.")
+		"Name of validatingwegbhookconfiguration to patch, if istioctl is not used.")
 )
 
 func (s *Server) initConfigValidation(args *PilotArgs) error {
@@ -42,16 +42,13 @@ func (s *Server) initConfigValidation(args *PilotArgs) error {
 		return nil
 	}
 
-	if !validationEnabled.Get() {
-		return nil
-	}
-
 	log.Info("initializing config validator")
 	// always start the validation server
 	params := server.Options{
-		Schemas:      collections.Istio,
-		DomainSuffix: args.RegistryOptions.KubeOptions.DomainSuffix,
-		Mux:          s.httpsMux,
+		MixerValidator: validate.NewDefaultValidator(false),
+		Schemas:        collections.Istio,
+		DomainSuffix:   args.RegistryOptions.KubeOptions.DomainSuffix,
+		Mux:            s.httpsMux,
 	}
 	whServer, err := server.New(params)
 	if err != nil {

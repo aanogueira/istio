@@ -87,6 +87,8 @@ func (s *scope) get(ref interface{}) error {
 		targetT = targetT.Elem()
 	}
 
+	target := fmt.Sprintf("%v", targetT)
+	fmt.Printf("target: %s\n", target)
 	for _, res := range s.resources {
 		if res == nil {
 			continue
@@ -133,31 +135,25 @@ func (s *scope) done(nocleanup bool) error {
 	}()
 
 	var err error
-	// Do reverse walk for cleanup.
-	for i := len(s.closers) - 1; i >= 0; i-- {
-		c := s.closers[i]
+	if !nocleanup {
 
-		if nocleanup {
-			if cc, ok := c.(*closer); ok && cc.noskip {
-				continue
-			} else if !ok {
-				continue
+		// Do reverse walk for cleanup.
+		for i := len(s.closers) - 1; i >= 0; i-- {
+			c := s.closers[i]
+
+			name := "lambda"
+			if r, ok := c.(resource.Resource); ok {
+				name = fmt.Sprintf("resource %v", r.ID())
 			}
-		}
 
-		name := "lambda"
-		if r, ok := c.(resource.Resource); ok {
-			name = fmt.Sprintf("resource %v", r.ID())
+			scopes.Framework.Debugf("Begin cleaning up %s", name)
+			if e := c.Close(); e != nil {
+				scopes.Framework.Debugf("Error cleaning up %s: %v", name, e)
+				err = multierror.Append(err, e)
+			}
+			scopes.Framework.Debugf("Cleanup complete for %s", name)
 		}
-
-		scopes.Framework.Debugf("Begin cleaning up %s", name)
-		if e := c.Close(); e != nil {
-			scopes.Framework.Debugf("Error cleaning up %s: %v", name, e)
-			err = multierror.Append(err, e)
-		}
-		scopes.Framework.Debugf("Cleanup complete for %s", name)
 	}
-
 	s.mu.Lock()
 	s.resources = nil
 	s.closers = nil
@@ -171,15 +167,15 @@ func (s *scope) waitForDone() {
 	<-s.closeChan
 }
 
-func (s *scope) dump(ctx resource.Context) {
+func (s *scope) dump() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range s.children {
-		c.dump(ctx)
+		c.dump()
 	}
 	for _, c := range s.resources {
 		if d, ok := c.(resource.Dumper); ok {
-			d.Dump(ctx)
+			d.Dump()
 		}
 	}
 }

@@ -4,5 +4,5 @@ area: networking
 issue:
   - 27726
 releaseNotes:
-- |
-  **Fixed** pilot agent app probe connection leak.
+  - |
+    **Fixed** pilot agent app probe connection leak.

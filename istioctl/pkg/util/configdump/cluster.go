@@ -18,10 +18,8 @@ import (
 	"sort"
 
 	adminapi "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
-	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	"github.com/golang/protobuf/ptypes"
-
-	v3 "istio.io/istio/pilot/pkg/xds/v3"
 )
 
 // GetDynamicClusterDump retrieves a cluster dump with just dynamic active clusters in it
@@ -33,10 +31,10 @@ func (w *Wrapper) GetDynamicClusterDump(stripVersions bool) (*adminapi.ClustersC
 	dac := clusterDump.GetDynamicActiveClusters()
 	// Allow sorting to work even if we don't have the exact same type
 	for i := range dac {
-		dac[i].Cluster.TypeUrl = v3.ClusterType
+		dac[i].Cluster.TypeUrl = "type.googleapis.com/envoy.api.v2.Cluster"
 	}
 	sort.Slice(dac, func(i, j int) bool {
-		cluster := &cluster.Cluster{}
+		cluster := &xdsapi.Cluster{}
 		err = ptypes.UnmarshalAny(dac[i].Cluster, cluster)
 		if err != nil {
 			return false

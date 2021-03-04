@@ -17,25 +17,27 @@ package mesh
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/util/validation"
 
 	"istio.io/api/operator/v1alpha1"
 	"istio.io/istio/istioctl/pkg/install/k8sversion"
-	v1alpha12 "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
+	iopv1alpha1 "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
 	"istio.io/istio/operator/pkg/cache"
-	"istio.io/istio/operator/pkg/controller/istiocontrolplane"
 	"istio.io/istio/operator/pkg/helmreconciler"
 	"istio.io/istio/operator/pkg/manifest"
-	"istio.io/istio/operator/pkg/name"
 	"istio.io/istio/operator/pkg/translate"
-	"istio.io/istio/operator/pkg/util"
 	"istio.io/istio/operator/pkg/util/clog"
 	"istio.io/istio/operator/pkg/util/progress"
 	"istio.io/pkg/log"
+	"istio.io/pkg/version"
+)
+
+const (
+	// installedSpecCRPrefix is the prefix of any IstioOperator CR stored in the cluster that is a copy of the CR used
+	// in the last install operation.
+	installedSpecCRPrefix = "installed-state"
 )
 
 type installArgs struct {
@@ -64,12 +66,12 @@ type installArgs struct {
 
 func addInstallFlags(cmd *cobra.Command, args *installArgs) {
 	cmd.PersistentFlags().StringSliceVarP(&args.inFilenames, "filename", "f", nil, filenameFlagHelpStr)
-	cmd.PersistentFlags().StringVarP(&args.kubeConfigPath, "kubeconfig", "c", "", KubeConfigFlagHelpStr)
-	cmd.PersistentFlags().StringVar(&args.context, "context", "", ContextFlagHelpStr)
+	cmd.PersistentFlags().StringVarP(&args.kubeConfigPath, "kubeconfig", "c", "", "Path to kube config.")
+	cmd.PersistentFlags().StringVar(&args.context, "context", "", "The name of the kubeconfig context to use.")
 	cmd.PersistentFlags().DurationVar(&args.readinessTimeout, "readiness-timeout", 300*time.Second,
 		"Maximum time to wait for Istio resources in each component to be ready.")
 	cmd.PersistentFlags().BoolVarP(&args.skipConfirmation, "skip-confirmation", "y", false, skipConfirmationFlagHelpStr)
-	cmd.PersistentFlags().BoolVar(&args.force, "force", false, ForceFlagHelpStr)
+	cmd.PersistentFlags().BoolVar(&args.force, "force", false, "Proceed even with validation errors.")
 	cmd.PersistentFlags().StringArrayVarP(&args.set, "set", "s", nil, setFlagHelpStr)
 	cmd.PersistentFlags().StringVarP(&args.manifestsPath, "charts", "", "", ChartsDeprecatedStr)
 	cmd.PersistentFlags().StringVarP(&args.manifestsPath, "manifests", "d", "", ManifestsFlagHelpStr)
@@ -84,7 +86,7 @@ func InstallCmd(logOpts *log.Options) *cobra.Command {
 	ic := &cobra.Command{
 		Use:   "install",
 		Short: "Applies an Istio manifest, installing or reconfiguring Istio on a cluster.",
-		Long:  "The install command generates an Istio install manifest and applies it to a cluster.",
+		Long:  "The install generates an Istio install manifest and applies it to a cluster.",
 		// nolint: lll
 		Example: `  # Apply a default Istio installation
   istioctl install
@@ -99,13 +101,6 @@ func InstallCmd(logOpts *log.Options) *cobra.Command {
   istioctl install --set "values.sidecarInjectorWebhook.injectedAnnotations.container\.apparmor\.security\.beta\.kubernetes\.io/istio-proxy=runtime/default"
 `,
 		Args: cobra.ExactArgs(0),
-		PreRunE: func(cmd *cobra.Command, args []string) error {
-			errs := validation.IsQualifiedName(iArgs.revision)
-			if len(errs) != 0 && cmd.PersistentFlags().Changed("revision") {
-				return fmt.Errorf("invalid revision specified:\n%v", strings.Join(errs, "\n"))
-			}
-			return nil
-		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runApplyCmd(cmd, rootArgs, iArgs, logOpts)
 		}}
@@ -117,18 +112,9 @@ func InstallCmd(logOpts *log.Options) *cobra.Command {
 
 func runApplyCmd(cmd *cobra.Command, rootArgs *rootArgs, iArgs *installArgs, logOpts *log.Options) error {
 	l := clog.NewConsoleLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), installerScope)
-	setFlags := applyFlagAliases(iArgs.set, iArgs.manifestsPath, iArgs.revision)
 	// Warn users if they use `istioctl install` without any config args.
-	if !rootArgs.dryRun && !iArgs.skipConfirmation {
-		profile, enabledComponents, err := getProfileAndEnabledComponents(setFlags, iArgs.inFilenames, iArgs.force, l)
-		if err != nil {
-			return fmt.Errorf("failed to get profile and enabled components: %v", err)
-		}
-		prompt := fmt.Sprintf("This will install the Istio %s profile with %q components into the cluster. Proceed? (y/N)", profile, enabledComponents)
-		if profile == "empty" {
-			prompt = fmt.Sprintf("This will install the Istio %s profile into the cluster. Proceed? (y/N)", profile)
-		}
-		if !confirm(prompt, cmd.OutOrStdout()) {
+	if len(iArgs.inFilenames) == 0 && len(iArgs.set) == 0 && !rootArgs.dryRun && !iArgs.skipConfirmation {
+		if !confirm("This will install the default Istio profile into the cluster. Proceed? (y/N)", cmd.OutOrStdout()) {
 			cmd.Print("Cancelled.\n")
 			os.Exit(1)
 		}
@@ -136,7 +122,7 @@ func runApplyCmd(cmd *cobra.Command, rootArgs *rootArgs, iArgs *installArgs, log
 	if err := configLogs(logOpts); err != nil {
 		return fmt.Errorf("could not configure logs: %s", err)
 	}
-	if err := InstallManifests(setFlags, iArgs.inFilenames, iArgs.force, rootArgs.dryRun,
+	if err := InstallManifests(applyFlagAliases(iArgs.set, iArgs.manifestsPath, iArgs.revision), iArgs.inFilenames, iArgs.force, rootArgs.dryRun,
 		iArgs.kubeConfigPath, iArgs.context, iArgs.readinessTimeout, l); err != nil {
 		return fmt.Errorf("failed to install manifests: %v", err)
 	}
@@ -155,10 +141,32 @@ func InstallManifests(setOverlay []string, inFilenames []string, force bool, dry
 	if err != nil {
 		return err
 	}
-	if err := k8sversion.IsK8VersionSupported(clientset, l); err != nil {
+
+	serverVersion, err := clientset.Discovery().ServerVersion()
+	if err != nil {
+		return fmt.Errorf("error getting Kubernetes version: %w", err)
+	}
+	ok, err := k8sversion.CheckKubernetesVersion(serverVersion)
+	if err != nil {
+		return fmt.Errorf("error checking if Kubernetes version is supported: %w", err)
+	}
+	if !ok {
+		l.LogAndPrintf("\nThe Kubernetes version %s is not supported by Istio %s. The minimum supported Kubernetes version is %s.\n"+
+			"Proceeding with the installation, but you might experience problems. "+
+			"See https://istio.io/latest/docs/setup/platform-setup/ for a list of supported versions.\n",
+			serverVersion.GitVersion, version.Info.Version, k8sversion.MinK8SVersion)
+	}
+
+	_, iops, err := manifest.GenerateConfig(inFilenames, setOverlay, force, restConfig, l)
+	if err != nil {
 		return err
 	}
-	_, iop, err := manifest.GenerateConfig(inFilenames, setOverlay, force, restConfig, l)
+
+	crName := installedSpecCRPrefix
+	if iops.Revision != "" {
+		crName += "-" + iops.Revision
+	}
+	iop, err := translate.IOPStoIOP(iops, crName, iopv1alpha1.Namespace(iops))
 	if err != nil {
 		return err
 	}
@@ -177,7 +185,7 @@ func InstallManifests(setOverlay []string, inFilenames []string, force bool, dry
 	}
 	status, err := reconciler.Reconcile()
 	if err != nil {
-		return fmt.Errorf("errors occurred during operation: %v", err)
+		return fmt.Errorf("errors occurred during operation")
 	}
 	if status.Status != v1alpha1.InstallStatus_HEALTHY {
 		return fmt.Errorf("errors occurred during operation")
@@ -185,66 +193,11 @@ func InstallManifests(setOverlay []string, inFilenames []string, force bool, dry
 
 	opts.ProgressLog.SetState(progress.StateComplete)
 
-	// Save a copy of what was installed as a CR in the cluster under an internal name.
-	iop.Name = savedIOPName(iop)
-	if iop.Annotations == nil {
-		iop.Annotations = make(map[string]string)
-	}
-	iop.Annotations[istiocontrolplane.IgnoreReconcileAnnotation] = "true"
-	iopStr, err := util.MarshalWithJSONPB(iop)
+	// Save state to cluster in IstioOperator CR.
+	iopStr, err := translate.IOPStoIOPstr(iops, crName, iopv1alpha1.Namespace(iops))
 	if err != nil {
 		return err
 	}
 
 	return saveIOPToCluster(reconciler, iopStr)
-}
-
-func savedIOPName(iop *v1alpha12.IstioOperator) string {
-	ret := name.InstalledSpecCRPrefix
-	if iop.Name != "" {
-		ret += "-" + iop.Name
-	}
-	if iop.Spec.Revision != "" {
-		ret += "-" + iop.Spec.Revision
-	}
-	return ret
-}
-
-// GetProfileAndEnabledComponents get the profile and all the enabled components
-// from the given input files and --set flag overlays.
-func getProfileAndEnabledComponents(setOverlay []string, inFilenames []string, force bool, l clog.Logger) (string, []string, error) {
-	overlayYAML, profile, err := manifest.ReadYamlProfile(inFilenames, setOverlay, force, l)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to read profile: %v", err)
-	}
-	_, iop, err := manifest.GenIOPFromProfile(profile, overlayYAML, setOverlay, force, false, nil, l)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to generate IOP from profile %s: %v", profile, err)
-	}
-
-	var enabledComponents []string
-	if iop.Spec.Components != nil {
-		for _, c := range name.AllCoreComponentNames {
-			enabled, err := translate.IsComponentEnabledInSpec(c, iop.Spec)
-			if err != nil {
-				return "", nil, fmt.Errorf("failed to check if component: %s is enabled or not: %v", string(c), err)
-			}
-			if enabled {
-				enabledComponents = append(enabledComponents, name.UserFacingComponentName(c))
-			}
-		}
-		for _, c := range iop.Spec.Components.IngressGateways {
-			if c.Enabled.Value {
-				enabledComponents = append(enabledComponents, name.UserFacingComponentName(name.IngressComponentName))
-				break
-			}
-		}
-		for _, c := range iop.Spec.Components.EgressGateways {
-			if c.Enabled.Value {
-				enabledComponents = append(enabledComponents, name.UserFacingComponentName(name.EgressComponentName))
-				break
-			}
-		}
-	}
-	return profile, enabledComponents, nil
 }

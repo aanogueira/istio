@@ -35,7 +35,6 @@ import (
 )
 
 const bearerTokenPrefix = "Bearer "
-const hubIDPPrefix = "https://gkehub.googleapis.com/"
 
 var (
 	googleCAClientLog = log.RegisterScope("googleca", "Google CA client debugging", 0)
@@ -110,7 +109,6 @@ func (cl *googleCAClient) CSRSign(ctx context.Context, reqID string, csrPEM []by
 	resp, err := cl.client.CreateCertificate(ctx, req)
 	if err != nil {
 		googleCAClientLog.Errorf("Failed to create certificate: %v", err)
-		googleCAClientLog.Debugf("Original request %v, resp %v", req, resp)
 		return nil, err
 	}
 
@@ -118,7 +116,6 @@ func (cl *googleCAClient) CSRSign(ctx context.Context, reqID string, csrPEM []by
 		googleCAClientLog.Errorf("CertChain length is %d, expected more than 1", len(resp.CertChain))
 		return nil, errors.New("invalid response cert chain")
 	}
-	googleCAClientLog.Infof("Cert created with GoogleCA %s chain length %d", zone, len(resp.CertChain))
 
 	return resp.CertChain, nil
 }
@@ -135,10 +132,6 @@ func (cl *googleCAClient) getTLSDialOption() (grpc.DialOption, error) {
 }
 
 func parseZone(clusterURL string) string {
-	// for Hub IDNS, the input is https://gkehub.googleapis.com/projects/HUB_PROJECT_ID/locations/global/memberships/MEMBERSHIP_ID which is global
-	if strings.HasPrefix(clusterURL, hubIDPPrefix) {
-		return ""
-	}
 	// input: https://container.googleapis.com/v1/projects/testproj/locations/us-central1-c/clusters/cluster1
 	// output: us-central1-c
 	var rgx = regexp.MustCompile(`.*/projects/(.*)/locations/(.*)/clusters/.*`)

@@ -22,14 +22,17 @@ import (
 	"testing"
 	"time"
 
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/destinationrule"
+
 	. "github.com/onsi/gomega"
+
+	"istio.io/pkg/log"
 
 	"istio.io/istio/galley/pkg/config/analysis"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/annotations"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/authz"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/deployment"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/deprecation"
-	"istio.io/istio/galley/pkg/config/analysis/analyzers/destinationrule"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/gateway"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/injection"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/multicluster"
@@ -43,7 +46,6 @@ import (
 	"istio.io/istio/galley/pkg/config/scope"
 	"istio.io/istio/pkg/config/schema"
 	"istio.io/istio/pkg/config/schema/collection"
-	"istio.io/pkg/log"
 )
 
 type message struct {
@@ -74,6 +76,7 @@ var testGrid = []testCase{
 		analyzer: &annotations.K8sAnalyzer{},
 		expected: []message{
 			{msg.UnknownAnnotation, "Service httpbin"},
+			{msg.MisplacedAnnotation, "Service details"},
 			{msg.InvalidAnnotation, "Pod invalid-annotations"},
 			{msg.MisplacedAnnotation, "Pod grafana-test"},
 			{msg.MisplacedAnnotation, "Deployment fortio-deploy"},
@@ -87,6 +90,7 @@ var testGrid = []testCase{
 		expected: []message{
 			{msg.Deprecated, "VirtualService productpage.foo"},
 			{msg.Deprecated, "Sidecar no-selector.default"},
+			{msg.Deprecated, "QuotaSpec request-count.istio-system"},
 		},
 	},
 	{
@@ -162,17 +166,6 @@ var testGrid = []testCase{
 		inputFiles: []string{
 			"testdata/injection-with-mismatched-sidecar.yaml",
 			"testdata/common/sidecar-injector-configmap.yaml",
-		},
-		analyzer: &injection.ImageAnalyzer{},
-		expected: []message{
-			{msg.IstioProxyImageMismatch, "Pod details-v1-pod-old.enabled-namespace"},
-		},
-	},
-	{
-		name: "istioInjectionProxyImageMismatchAbsolute",
-		inputFiles: []string{
-			"testdata/injection-with-mismatched-sidecar.yaml",
-			"testdata/sidecar-injector-configmap-absolute-override.yaml",
 		},
 		analyzer: &injection.ImageAnalyzer{},
 		expected: []message{
@@ -392,28 +385,6 @@ var testGrid = []testCase{
 		analyzer: &destinationrule.CaCertificateAnalyzer{},
 		expected: []message{},
 	},
-	{
-		name: "dupmatches",
-		inputFiles: []string{
-			"testdata/virtualservice_dupmatches.yaml",
-		},
-		analyzer: &virtualservice.MatchesAnalyzer{},
-		expected: []message{
-			{msg.VirtualServiceUnreachableRule, "VirtualService duplicate-match"},
-			{msg.VirtualServiceUnreachableRule, "VirtualService sample-foo-cluster01.foo"},
-			{msg.VirtualServiceIneffectiveMatch, "VirtualService almost-duplicate-match"},
-			{msg.VirtualServiceIneffectiveMatch, "VirtualService duplicate-match"},
-
-			{msg.VirtualServiceUnreachableRule, "VirtualService duplicate-tcp-match"},
-			{msg.VirtualServiceUnreachableRule, "VirtualService duplicate-empty-tcp"},
-			{msg.VirtualServiceIneffectiveMatch, "VirtualService almost-duplicate-tcp-match"},
-			{msg.VirtualServiceIneffectiveMatch, "VirtualService duplicate-tcp-match"},
-
-			{msg.VirtualServiceUnreachableRule, "VirtualService tls-routing.none"},
-			{msg.VirtualServiceIneffectiveMatch, "VirtualService tls-routing-almostmatch.none"},
-			{msg.VirtualServiceIneffectiveMatch, "VirtualService tls-routing.none"},
-		},
-	},
 }
 
 // regex patterns for analyzer names that should be explicitly ignored for testing
@@ -432,7 +403,7 @@ func TestAnalyzers(t *testing.T) {
 	for _, tc := range testGrid {
 		tc := tc // Capture range variable so subtests work correctly
 		t.Run(tc.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 
 			// Set up a hook to record which collections are accessed by each analyzer
 			analyzerName := tc.analyzer.Metadata().Name
@@ -462,7 +433,7 @@ func TestAnalyzers(t *testing.T) {
 	// Verify that the collections actually accessed during testing actually match
 	// the collections declared as inputs for each of the analyzers
 	t.Run("CheckMetadataInputs", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 	outer:
 		for _, a := range All() {
 			analyzerName := a.Metadata().Name
@@ -492,7 +463,7 @@ func TestAnalyzers(t *testing.T) {
 
 // Verify that all of the analyzers tested here are also registered in All()
 func TestAnalyzersInAll(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	var allNames []string
 	for _, a := range All() {
@@ -505,7 +476,7 @@ func TestAnalyzersInAll(t *testing.T) {
 }
 
 func TestAnalyzersHaveUniqueNames(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	existingNames := make(map[string]struct{})
 	for _, a := range All() {
@@ -523,7 +494,7 @@ func TestAnalyzersHaveUniqueNames(t *testing.T) {
 }
 
 func TestAnalyzersHaveDescription(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	for _, a := range All() {
 		g.Expect(a.Metadata().Description).ToNot(Equal(""))

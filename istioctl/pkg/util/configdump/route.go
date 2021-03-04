@@ -57,12 +57,11 @@ func (w *Wrapper) GetDynamicRouteDump(stripVersions bool) (*adminapi.RoutesConfi
 		return nil, err
 	}
 	drc := routeDump.GetDynamicRouteConfigs()
-	// Support v2 or v3 in config dump. See ads.go:RequestedTypes for more info.
-	for i := range drc {
-		drc[i].RouteConfig.TypeUrl = v3.RouteType
-	}
 	sort.Slice(drc, func(i, j int) bool {
+		// Support v2 or v3 in config dump. See ads.go:RequestedTypes for more info.
 		r := &route.RouteConfiguration{}
+		drc[i].RouteConfig.TypeUrl = v3.RouteType
+		drc[j].RouteConfig.TypeUrl = v3.RouteType
 		err = ptypes.UnmarshalAny(drc[i].RouteConfig, r)
 		if err != nil {
 			return false

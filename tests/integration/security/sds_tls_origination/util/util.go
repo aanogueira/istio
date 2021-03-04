@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,19 +24,24 @@ import (
 	"testing"
 	"time"
 
-	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"istio.io/istio/pkg/config/protocol"
-	"istio.io/istio/pkg/test/echo/common"
+	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework"
+	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	"istio.io/istio/pkg/test/framework/components/istio"
+
+	"istio.io/istio/pkg/test/echo/common"
+	"istio.io/istio/pkg/test/framework/resource"
+
+	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
+
+	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
-	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/namespace"
-	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/test/util/structpath"
 )
@@ -74,28 +78,28 @@ const (
 // CreateKubeSecret reads credential names from credNames and key/cert from TLSCredential,
 // and creates K8s secrets for gateway.
 // nolint: interfacer
-func CreateKubeSecret(ctx framework.TestContext, credNames []string,
+func CreateKubeSecret(t test.Failer, ctx framework.TestContext, credNames []string,
 	credentialType string, egressCred TLSCredential, isNotGeneric bool) {
-	ctx.Helper()
+	t.Helper()
 	// Get namespace for gateway pod.
-	istioCfg := istio.DefaultConfigOrFail(ctx, ctx)
-	systemNS := namespace.ClaimOrFail(ctx, ctx, istioCfg.SystemNamespace)
+	istioCfg := istio.DefaultConfigOrFail(t, ctx)
+	systemNS := namespace.ClaimOrFail(t, ctx, istioCfg.SystemNamespace)
 
 	if len(credNames) == 0 {
 		ctx.Log("no credential names are specified, skip creating secret")
 		return
 	}
 	// Create Kubernetes secret for gateway
-	cluster := ctx.Clusters().Default()
+	cluster := ctx.Environment().(*kube.Environment).KubeClusters[0]
 	for _, cn := range credNames {
 		secret := createSecret(credentialType, cn, systemNS.Name(), egressCred, isNotGeneric)
 		_, err := cluster.CoreV1().Secrets(systemNS.Name()).Create(context.TODO(), secret, metav1.CreateOptions{})
 		if err != nil {
-			ctx.Fatalf("Failed to create secret (error: %s)", err)
+			t.Fatalf("Failed to create secret (error: %s)", err)
 		}
 	}
 	// Check if Kubernetes secret is ready
-	retry.UntilSuccessOrFail(ctx, func() error {
+	retry.UntilSuccessOrFail(t, func() error {
 		for _, cn := range credNames {
 			_, err := cluster.CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), cn, metav1.GetOptions{})
 			if err != nil {
@@ -163,7 +167,7 @@ func SetupEcho(t *testing.T, ctx resource.Context) (echo.Instance, echo.Instance
 	})
 
 	var internalClient, externalServer echo.Instance
-	echoboot.NewBuilder(ctx).
+	echoboot.NewBuilderOrFail(t, ctx).
 		With(&internalClient, echo.Config{
 			Service:   "client",
 			Namespace: clientNamespace,
@@ -223,46 +227,37 @@ const (
 apiVersion: networking.istio.io/v1alpha3
 kind: Gateway
 metadata:
-  name: istio-egressgateway-sds
+  name: istio-egressgateway
 spec:
   selector:
     istio: egressgateway
   servers:
     - port:
-        number: 443
-        name: https-sds
-        protocol: HTTPS
+        number: 80
+        name: http-port-for-tls-origination
+        protocol: HTTP
       hosts:
-      - server.{{.ServerNamespace}}.svc.cluster.local
-      tls:
-        mode: ISTIO_MUTUAL
+        - server.{{.ServerNamespace}}.svc.cluster.local
 ---
 apiVersion: networking.istio.io/v1alpha3
 kind: DestinationRule
 metadata:
-  name: egressgateway-for-server-sds
+  name: egressgateway-for-server
 spec:
   host: istio-egressgateway.istio-system.svc.cluster.local
   subsets:
   - name: server
-    trafficPolicy:
-      portLevelSettings:
-      - port:
-          number: 443
-        tls:
-          mode: ISTIO_MUTUAL
-          sni: server.{{.ServerNamespace}}.svc.cluster.local
 `
 	VirtualService = `
 apiVersion: networking.istio.io/v1alpha3
 kind: VirtualService
 metadata:
-  name: route-via-egressgateway-sds
+  name: route-via-egressgateway
 spec:
   hosts:
     - server.{{.ServerNamespace}}.svc.cluster.local
   gateways:
-    - istio-egressgateway-sds
+    - istio-egressgateway
     - mesh
   http:
     - match:
@@ -274,12 +269,12 @@ spec:
             host: istio-egressgateway.istio-system.svc.cluster.local
             subset: server
             port:
-              number: 443
+              number: 80
           weight: 100
     - match:
         - gateways:
-            - istio-egressgateway-sds
-          port: 443
+            - istio-egressgateway
+          port: 80
       route:
         - destination:
             host: server.{{.ServerNamespace}}.svc.cluster.local
@@ -333,7 +328,7 @@ const (
 apiVersion: networking.istio.io/v1alpha3
 kind: DestinationRule
 metadata:
-  name: originate-tls-for-server-sds-{{.CredentialName}}
+  name: originate-tls-for-server
 spec:
   host: "server.{{.ServerNamespace}}.svc.cluster.local"
   trafficPolicy:

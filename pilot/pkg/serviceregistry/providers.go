@@ -22,6 +22,8 @@ const (
 	Mock ProviderID = "Mock"
 	// Kubernetes is a service registry backed by k8s API server
 	Kubernetes ProviderID = "Kubernetes"
+	// Consul is a service registry backed by Consul
+	Consul ProviderID = "Consul"
 	// MCP is a service registry backed by MCP ServiceEntries
 	MCP ProviderID = "MCP"
 	// External is a service registry for externally provided ServiceEntries

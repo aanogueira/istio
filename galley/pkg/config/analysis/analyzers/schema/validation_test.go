@@ -20,27 +20,28 @@ import (
 	"github.com/hashicorp/go-multierror"
 	. "github.com/onsi/gomega"
 
+	"github.com/gogo/protobuf/proto"
+
 	"istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/galley/pkg/config/analysis/msg"
 	"istio.io/istio/galley/pkg/config/analysis/testing/fixtures"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/resource"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
 	resource2 "istio.io/istio/pkg/config/schema/resource"
-	"istio.io/istio/pkg/config/validation"
 )
 
 func TestCorrectArgs(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	m1 := &v1alpha3.VirtualService{}
 
-	testSchema := schemaWithValidateFn(func(cfg config.Config) (warnings validation.Warning, errs error) {
-		g.Expect(cfg.Name).To(Equal("name"))
-		g.Expect(cfg.Namespace).To(Equal("ns"))
-		g.Expect(cfg.Spec).To(Equal(m1))
-		return nil, nil
+	testSchema := schemaWithValidateFn(func(name, ns string, msg proto.Message) (errs error) {
+		g.Expect(name).To(Equal("name"))
+		g.Expect(ns).To(Equal("ns"))
+		g.Expect(msg).To(Equal(m1))
+		return nil
 	})
 	ctx := &fixtures.Context{
 		Resources: []*resource.Instance{
@@ -64,28 +65,28 @@ func TestSchemaValidationWrapper(t *testing.T) {
 	m2 := &v1alpha3.VirtualService{}
 	m3 := &v1alpha3.VirtualService{}
 
-	testSchema := schemaWithValidateFn(func(cfg config.Config) (warnings validation.Warning, errs error) {
-		if cfg.Spec == m1 {
-			return nil, nil
+	testSchema := schemaWithValidateFn(func(_, _ string, msg proto.Message) (errs error) {
+		if msg == m1 {
+			return nil
 		}
-		if cfg.Spec == m2 {
-			return nil, fmt.Errorf("")
+		if msg == m2 {
+			return fmt.Errorf("")
 		}
-		if cfg.Spec == m3 {
-			return nil, multierror.Append(fmt.Errorf(""), fmt.Errorf(""))
+		if msg == m3 {
+			return multierror.Append(fmt.Errorf(""), fmt.Errorf(""))
 		}
-		return nil, nil
+		return nil
 	})
 
 	a := ValidationAnalyzer{s: testSchema}
 
 	t.Run("CheckMetadataInputs", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		g.Expect(a.Metadata().Inputs).To(ConsistOf(testCol))
 	})
 
 	t.Run("NoErrors", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		ctx := &fixtures.Context{
 			Resources: []*resource.Instance{
 				{
@@ -98,7 +99,7 @@ func TestSchemaValidationWrapper(t *testing.T) {
 	})
 
 	t.Run("SingleError", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 
 		ctx := &fixtures.Context{
 			Resources: []*resource.Instance{
@@ -114,7 +115,7 @@ func TestSchemaValidationWrapper(t *testing.T) {
 	})
 
 	t.Run("MultiError", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		ctx := &fixtures.Context{
 			Resources: []*resource.Instance{
 				{
@@ -130,7 +131,7 @@ func TestSchemaValidationWrapper(t *testing.T) {
 	})
 }
 
-func schemaWithValidateFn(validateFn func(cfg config.Config) (validation.Warning, error)) collection.Schema {
+func schemaWithValidateFn(validateFn func(string, string, proto.Message) error) collection.Schema {
 	original := collections.IstioNetworkingV1Alpha3Virtualservices
 	return collection.Builder{
 		Name: original.Name().String(),
@@ -152,7 +153,6 @@ type fakeOrigin struct{}
 func (fakeOrigin) FriendlyName() string          { return "myFriendlyName" }
 func (fakeOrigin) Namespace() resource.Namespace { return "myNamespace" }
 func (fakeOrigin) Reference() resource.Reference { return fakeReference{} }
-func (fakeOrigin) FieldMap() map[string]int      { return make(map[string]int) }
 
 type fakeReference struct{}
 

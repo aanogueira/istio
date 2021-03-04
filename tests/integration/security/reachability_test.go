@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,10 +18,9 @@ import (
 	"testing"
 
 	"istio.io/istio/pkg/test/echo/common/scheme"
-
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
-	"istio.io/istio/pkg/test/framework/components/istio"
+	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/tests/integration/security/util/reachability"
 )
 
@@ -36,9 +34,10 @@ import (
 // - Send HTTP/gRPC requests between apps.
 func TestReachability(t *testing.T) {
 	framework.NewTest(t).
-		Features("security.reachability").
 		Run(func(ctx framework.TestContext) {
-			systemNM := istio.ClaimSystemNamespaceOrFail(ctx, ctx)
+
+			rctx := reachability.CreateContext(ctx, p, true)
+			systemNM := namespace.ClaimSystemNamespaceOrFail(ctx, ctx)
 
 			testCases := []reachability.TestCase{
 				{
@@ -48,12 +47,13 @@ func TestReachability(t *testing.T) {
 						return true
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
-						if apps.IsNaked(src) && apps.IsNaked(opts.Target) {
+						if rctx.IsNaked(src) && rctx.IsNaked(opts.Target) {
 							// naked->naked should always succeed.
 							return true
 						}
+
 						// If one of the two endpoints is naked, expect failure.
-						return !apps.IsNaked(src) && !apps.IsNaked(opts.Target)
+						return !rctx.IsNaked(src) && !rctx.IsNaked(opts.Target)
 					},
 				},
 				{
@@ -63,7 +63,7 @@ func TestReachability(t *testing.T) {
 						// Exclude calls from naked->VM since naked has no Envoy
 						// so k8s is responsible for DNS resolution
 						// However, no endpoint exists for VM in k8s, so calls from naked->VM will fail
-						return !apps.IsNaked(opts.Target) && !(apps.IsNaked(src) && apps.VM.Contains(opts.Target))
+						return !rctx.IsNaked(opts.Target) && !(rctx.IsNaked(src) && opts.Target == rctx.VM)
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						return true
@@ -74,56 +74,54 @@ func TestReachability(t *testing.T) {
 					Namespace:  systemNM,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Exclude calls from naked->VM.
-						return !(apps.IsNaked(src) && apps.VM.Contains(opts.Target))
+						return !(rctx.IsNaked(src) && opts.Target == rctx.VM)
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						return true
 					},
-					SkippedForMulticluster: true,
 				},
 				{
 					ConfigFile: "beta-per-port-mtls.yaml",
-					Namespace:  apps.Namespace1,
+					Namespace:  rctx.Namespace,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Include all tests that target app B, which has the single-port config.
-						return apps.B.Contains(opts.Target)
+						return opts.Target == rctx.B
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						return opts.PortName != "http"
 					},
-					SkippedForMulticluster: true,
 				},
 				{
 					ConfigFile: "beta-mtls-automtls.yaml",
-					Namespace:  apps.Namespace1,
+					Namespace:  rctx.Namespace,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						return true
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						// autoMtls doesn't work for client that doesn't have proxy, unless target doesn't
 						// have proxy neither.
-						if apps.IsNaked(src) {
-							return apps.IsNaked(opts.Target)
+						if rctx.IsNaked(src) {
+							return rctx.IsNaked(opts.Target)
 						}
 						return true
 					},
 				},
 				{
 					ConfigFile: "beta-mtls-partial-automtls.yaml",
-					Namespace:  apps.Namespace1,
+					Namespace:  rctx.Namespace,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						return true
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						// autoMtls doesn't work for client that doesn't have proxy, unless target doesn't
 						// have proxy or have mTLS disabled
-						if apps.IsNaked(src) {
-							return apps.IsNaked(opts.Target) || (apps.B.Contains(opts.Target) && opts.PortName != "http")
+						if rctx.IsNaked(src) {
+							return rctx.IsNaked(opts.Target) || (opts.Target == rctx.B && opts.PortName != "http")
 
 						}
 						// PeerAuthentication disable mTLS for workload app:b, except http port. Thus, autoMTLS
 						// will fail on all ports on b, except http port.
-						return !apps.B.Contains(opts.Target) || opts.PortName == "http"
+						return opts.Target != rctx.B || opts.PortName == "http"
 					},
 				},
 				{
@@ -131,14 +129,14 @@ func TestReachability(t *testing.T) {
 					Namespace:  systemNM,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Exclude calls to the headless TCP port.
-						if apps.IsHeadless(opts.Target) && opts.PortName == "tcp" {
+						if rctx.IsHeadless(opts.Target) && opts.PortName == "tcp" {
 							return false
 						}
 
 						// Exclude calls from naked->VM since naked has no Envoy
 						// so k8s is responsible for DNS resolution
 						// However, no endpoint exists for VM in k8s, so calls from naked->VM will fail
-						if apps.IsNaked(src) && apps.VM.Contains(opts.Target) {
+						if rctx.IsNaked(src) && opts.Target == rctx.VM {
 							return false
 						}
 
@@ -148,14 +146,13 @@ func TestReachability(t *testing.T) {
 						// When mTLS is disabled, all traffic should work.
 						return true
 					},
-					SkippedForMulticluster: true,
 				},
 				// --------start of auto mtls partial test cases ---------------
 				// The follow three consecutive test together ensures the auto mtls works as intended
 				// for sidecar migration scenario.
 				{
 					ConfigFile: "automtls-partial-sidecar-dr-no-tls.yaml",
-					Namespace:  apps.Namespace1,
+					Namespace:  rctx.Namespace,
 					CallOpts: []echo.CallOptions{
 						{
 							PortName: "http",
@@ -170,7 +167,7 @@ func TestReachability(t *testing.T) {
 					},
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// We only need one pair.
-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.Target)
+						return src == rctx.A && opts.Target == rctx.Multiversion
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						return true
@@ -178,7 +175,7 @@ func TestReachability(t *testing.T) {
 				},
 				{
 					ConfigFile: "automtls-partial-sidecar-dr-disable.yaml",
-					Namespace:  apps.Namespace1,
+					Namespace:  rctx.Namespace,
 					CallOpts: []echo.CallOptions{
 						{
 							PortName: "http",
@@ -193,7 +190,7 @@ func TestReachability(t *testing.T) {
 					},
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// We only need one pair.
-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.Target)
+						return src == rctx.A && opts.Target == rctx.Multiversion
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Only the request to legacy one succeeds as we disable mtls explicitly.
@@ -202,7 +199,7 @@ func TestReachability(t *testing.T) {
 				},
 				{
 					ConfigFile: "automtls-partial-sidecar-dr-mutual.yaml",
-					Namespace:  apps.Namespace1,
+					Namespace:  rctx.Namespace,
 					CallOpts: []echo.CallOptions{
 						{
 							PortName: "http",
@@ -217,7 +214,7 @@ func TestReachability(t *testing.T) {
 					},
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// We only need one pair.
-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.Target)
+						return src == rctx.A && opts.Target == rctx.Multiversion
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Only the request to vistio one succeeds as we enable mtls explicitly.
@@ -226,6 +223,6 @@ func TestReachability(t *testing.T) {
 				},
 				// ----- end of automtls partial test suites -----
 			}
-			reachability.Run(testCases, ctx, apps)
+			rctx.Run(testCases)
 		})
 }

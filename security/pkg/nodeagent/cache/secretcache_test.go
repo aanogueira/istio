@@ -28,16 +28,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"istio.io/istio/pkg/security"
+	"istio.io/istio/security/pkg/nodeagent/cache/mock"
+	"istio.io/pkg/filewatcher"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"istio.io/istio/pkg/security"
-	"istio.io/istio/security/pkg/nodeagent/cache/mock"
 	"istio.io/istio/security/pkg/nodeagent/secretfetcher"
 	nodeagentutil "istio.io/istio/security/pkg/nodeagent/util"
-	"istio.io/pkg/filewatcher"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 var (
@@ -180,6 +182,20 @@ FWy1
 		},
 		Type: "test-tls-secret",
 	}
+	fakeExpiredToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ik5adXVfam5Zdm5xQ19ZbU54aXRycV" +
+		"gyVWo3cmZkaFplcEF2QUJpUmxmLXMifQ.eyJhdWQiOlsiaXN0aW8tY2EiXSwiZXhwIjoxNTk2Nz" +
+		"Y5MTYyLCJpYXQiOjE1OTY3Njg1NjIsImlzcyI6Imh0dHBzOi8vY29udGFpbmVyLmdvb2dsZWFwa" +
+		"XMuY29tL3YxL3Byb2plY3RzL3dpbGxpYW1saWlzdGlvdGVzdC9sb2NhdGlvbnMvdXMtd2VzdDIt" +
+		"YS9jbHVzdGVycy92bWRlYnVnIiwia3ViZXJuZXRlcy5pbyI6eyJuYW1lc3BhY2UiOiJ2bXRlc3Q" +
+		"iLCJwb2QiOnsibmFtZSI6InNsZWVwLWY4Y2JmNWI3Ni14cHBteiIsInVpZCI6IjFkMDFkMWYwLW" +
+		"VkN2UtNDVhZS1iNTAzLTFhZjAwMDMyODFkZiJ9LCJzZXJ2aWNlYWNjb3VudCI6eyJuYW1lIjoic" +
+		"2xlZXAiLCJ1aWQiOiIzYmI3ZjJkYi1mMTEzLTQxYmItOTg3OC0yYTNhODlhYjNlMjYifX0sIm5i" +
+		"ZiI6MTU5Njc2ODU2Miwic3ViIjoic3lzdGVtOnNlcnZpY2VhY2NvdW50OnZtdGVzdDpzbGVlcCJ" +
+		"9.Ekw9liKDDQgK-RSzIfb2fM0ZH6vQeBKBfA9LuH_3UcCQzKSXV_l-qST3GMmBcmrbAF8MZLcNA" +
+		"bzlwZ_lcWDAYGvHG89fA4OKSZsvG0d83_nuP9hx39qqXSdrJ_OJMTGXXHcvapCgFFMPVa59KDCe" +
+		"aHkbTjmn6v3NpJ78_Cq8VxpNBKZkrdxEZOKfyula7tWegneWwJN7r0XWKB4A6hefMV8ouGI9p0N" +
+		"JujQG96_RkbY4dMeii3Z45mI6CtnAcWZ2ph8bO-OJz83KiGwtzfWvLjrPYpo-vcS7TuPNgALFgB" +
+		"SfH9S2mnmv1eJuiAYj4HkWM0K0_GK3wIBMe-YxBEmd4w"
 )
 
 func TestWorkloadAgentGenerateSecretWithoutPluginProvider(t *testing.T) {
@@ -208,12 +224,15 @@ func testWorkloadAgentGenerateSecret(t *testing.T, isUsingPluginProvider bool) {
 	}
 
 	fetcher := &secretfetcher.SecretFetcher{
-		CaClient: fakeCACli,
+		UseCaClient: true,
+		CaClient:    fakeCACli,
 	}
 	sc := NewSecretCache(fetcher, notifyCb, opt)
 	defer func() {
 		sc.Close()
 	}()
+
+	checkBool(t, "opt.SkipParseToken default", opt.SkipParseToken, false)
 
 	conID := "proxy1-id"
 	ctx := context.Background()
@@ -271,7 +290,8 @@ func TestWorkloadAgentRefreshSecret(t *testing.T) {
 		EvictionDuration: 0,
 	}
 	fetcher := &secretfetcher.SecretFetcher{
-		CaClient: fakeCACli,
+		UseCaClient: true,
+		CaClient:    fakeCACli,
 	}
 	sc := NewSecretCache(fetcher, notifyCb, opt)
 	defer func() {
@@ -628,7 +648,9 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 }
 
 func createSecretCache() *SecretCache {
-	fetcher := &secretfetcher.SecretFetcher{}
+	fetcher := &secretfetcher.SecretFetcher{
+		UseCaClient: false,
+	}
 	fetcher.FallbackSecretName = "gateway-fallback"
 	if fallbackSecret := os.Getenv("INGRESS_GATEWAY_FALLBACK_SECRET"); fallbackSecret != "" {
 		fetcher.FallbackSecretName = fallbackSecret
@@ -646,7 +668,9 @@ func createSecretCache() *SecretCache {
 
 // Validate that file mounted certs do not wait for ingress secret.
 func TestShouldWaitForGatewaySecretForFileMountedCerts(t *testing.T) {
-	fetcher := &secretfetcher.SecretFetcher{}
+	fetcher := &secretfetcher.SecretFetcher{
+		UseCaClient: false,
+	}
 	opt := &security.Options{
 		RotationInterval: 100 * time.Millisecond,
 		EvictionDuration: 0,
@@ -738,11 +762,76 @@ func TestGatewayAgentUpdateSecret(t *testing.T) {
 	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), false)
 }
 
-// nolint: unparam
+func TestConstructCSRHostName(t *testing.T) {
+	data, err := ioutil.ReadFile("./testdata/testjwt")
+	if err != nil {
+		t.Errorf("failed to read test jwt file %v", err)
+	}
+	testJwt := string(data)
+
+	cases := []struct {
+		trustDomain string
+		token       string
+		expected    string
+		errFlag     bool
+	}{
+		{
+			token:    testJwt,
+			expected: "spiffe://cluster.local/ns/default/sa/sleep",
+			errFlag:  false,
+		},
+		{
+			trustDomain: "fooDomain",
+			token:       testJwt,
+			expected:    "spiffe://fooDomain/ns/default/sa/sleep",
+			errFlag:     false,
+		},
+		{
+			token:    "faketoken",
+			expected: "",
+			errFlag:  true,
+		},
+	}
+	for _, c := range cases {
+		got, err := constructCSRHostName(c.trustDomain, c.token)
+		if err != nil {
+			if c.errFlag == false {
+				t.Errorf("constructCSRHostName no error, but got %v", err)
+			}
+			continue
+		}
+
+		if c.errFlag == true {
+			t.Error("constructCSRHostName error")
+		}
+
+		if got != c.expected {
+			t.Errorf("constructCSRHostName got %q, want %q", got, c.expected)
+		}
+	}
+}
+
 func checkBool(t *testing.T, name string, got bool, want bool) {
 	if got != want {
 		t.Errorf("%s: got: %v, want: %v", name, got, want)
 	}
+}
+
+func TestParseTokenFlag(t *testing.T) {
+	sc := createSecretCache()
+	defer sc.Close()
+	sc.configOptions.SkipParseToken = true
+	secret := security.SecretItem{}
+	checkBool(t, "isTokenExpired", sc.isTokenExpired(&secret), false)
+}
+
+func TestExpiredToken(t *testing.T) {
+	sc := createSecretCache()
+	defer sc.Close()
+	sc.configOptions.SkipParseToken = false
+	secret := security.SecretItem{}
+	secret.Token = fakeExpiredToken
+	checkBool(t, "isTokenExpired", sc.isTokenExpired(&secret), true)
 }
 
 func TestRootCertificateExists(t *testing.T) {
@@ -815,15 +904,15 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 		t.Fatalf("Error creating Mock CA client: %v", err)
 	}
 	opt := &security.Options{
-		// Large rotation, to make sure the test is not
-		// affected - this is not a rotation test.
-		RotationInterval: 2 * time.Hour,
+		RotationInterval: 200 * time.Millisecond,
 		EvictionDuration: 0,
 		UseTokenForCSR:   true,
+		SkipParseToken:   false,
 	}
 
 	fetcher := &secretfetcher.SecretFetcher{
-		CaClient: fakeCACli,
+		UseCaClient: true,
+		CaClient:    fakeCACli,
 	}
 
 	var wgAddedWatch sync.WaitGroup
@@ -873,11 +962,12 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 	ctx := context.Background()
 
 	wgAddedWatch.Add(1) // Watch should be added for cert file.
-	// notify is called only on rotation - it was accidentally called
-	// because rotation interval was set to a very small value.
+	notifyEvent.Add(1)  // Nofify should be called once.
+
 	gotSecret, err := sc.GenerateSecret(ctx, conID, WorkloadKeyCertResourceName, "jwtToken1")
 
 	wgAddedWatch.Wait()
+	notifyEvent.Wait()
 
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
@@ -893,13 +983,12 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 	}
 
 	wgAddedWatch.Add(1) // Watch should be added for root file.
+	notifyEvent.Add(1)  // Notify should be called once.
 
-	// This test was passing because it overrides secret rotation to 100ms,
-	// and the callback happens to be called on rotation (by accident I think, since
-	// secret is not supposed to be rotated - probably a sideffect of the token?)
 	gotSecretRoot, err := sc.GenerateSecret(ctx, conID, RootCertReqResourceName, "jwtToken1")
 
 	wgAddedWatch.Wait()
+	notifyEvent.Wait()
 
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
@@ -940,8 +1029,6 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 		Name: certChainPath,
 		Op:   fsnotify.Write,
 	})
-	// Test will timeout after a long time if rotation doesn't happen.
-	// A channel with timeout would work better.
 	notifyEvent.Wait()
 }
 
@@ -1197,44 +1284,5 @@ func TestShouldRotate(t *testing.T) {
 		if tc.sc.shouldRotate(tc.secret) != tc.shouldRotate {
 			t.Errorf("%s: unexpected shouldRotate return. Expected: %v", name, tc.shouldRotate)
 		}
-	}
-}
-
-func TestConcatCerts(t *testing.T) {
-	cases := []struct {
-		name     string
-		certs    []string
-		expected string
-	}{
-		{
-			name:     "no certs",
-			certs:    []string{},
-			expected: "",
-		},
-		{
-			name:     "single cert",
-			certs:    []string{"a"},
-			expected: "a",
-		},
-		{
-			name:     "multiple certs",
-			certs:    []string{"a", "b"},
-			expected: "a\nb",
-		},
-		{
-			name:     "existing newline",
-			certs:    []string{"a\n", "b"},
-			expected: "a\nb",
-		},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			result := string(concatCerts(c.certs))
-			if result != c.expected {
-				t.Fatalf("expected %q, got %q", c.expected, result)
-			}
-		})
-
 	}
 }

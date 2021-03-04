@@ -18,6 +18,8 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 
+	"istio.io/pkg/log"
+
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking"
@@ -25,12 +27,14 @@ import (
 	authn_model "istio.io/istio/pilot/pkg/security/model"
 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
 	protovalue "istio.io/istio/pkg/proto"
-	"istio.io/pkg/log"
+	"istio.io/istio/pkg/spiffe"
 )
 
 const (
-	// Service account for Pilot (hardcoded values at setup time)
+	// Service accounts for Mixer and Pilot, these are hardcoded values at setup time
 	PilotSvcAccName string = "istio-pilot-service-account"
+
+	MixerSvcAccName string = "istio-mixer-service-account"
 )
 
 var (
@@ -96,10 +100,8 @@ func BuildInboundFilterChain(mTLSMode model.MutualTLSMode, sdsUdsPath string, no
 				CipherSuites:              SupportedCiphers,
 			}
 		}
-
 	}
-
-	authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, meta, sdsUdsPath, []string{} /*subjectAltNames*/, trustDomainAliases)
+	authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, meta, sdsUdsPath, []string{} /*subjectAltNames*/, node.RequestedTypes.LDS, trustDomainAliases)
 
 	if mTLSMode == model.MTLSStrict {
 		log.Debug("Allow only istio mutual TLS traffic")
@@ -124,4 +126,13 @@ func BuildInboundFilterChain(mTLSMode model.MutualTLSMode, sdsUdsPath string, no
 		}
 	}
 	return nil
+}
+
+// GetSAN returns the SAN used for passed in identity for mTLS.
+func GetSAN(ns string, identity string) string {
+
+	if ns != "" {
+		return spiffe.MustGenSpiffeURI(ns, identity)
+	}
+	return spiffe.GenCustomSpiffe(identity)
 }

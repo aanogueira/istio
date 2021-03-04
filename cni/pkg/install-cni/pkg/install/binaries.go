@@ -19,8 +19,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/coreos/etcd/pkg/fileutil"
+
 	"istio.io/istio/cni/pkg/install-cni/pkg/constants"
-	"istio.io/istio/pkg/file"
+	"istio.io/istio/cni/pkg/install-cni/pkg/util"
 	"istio.io/pkg/log"
 )
 
@@ -31,7 +33,7 @@ func copyBinaries(updateBinaries bool, skipBinaries []string) error {
 	skipBinariesSet := arrToSet(skipBinaries)
 
 	for _, targetDir := range targetDirs {
-		if file.IsDirWriteable(targetDir) != nil {
+		if fileutil.IsDirWriteable(targetDir) != nil {
 			log.Infof("Directory %s is not writable, skipping.", targetDir)
 			continue
 		}
@@ -41,8 +43,8 @@ func copyBinaries(updateBinaries bool, skipBinaries []string) error {
 			return err
 		}
 
-		for _, f := range files {
-			filename := f.Name()
+		for _, file := range files {
+			filename := file.Name()
 			if skipBinariesSet[filename] {
 				log.Infof("%s is in SKIP_CNI_BINARIES, skipping.", filename)
 				continue
@@ -55,7 +57,7 @@ func copyBinaries(updateBinaries bool, skipBinaries []string) error {
 			}
 
 			srcFilepath := filepath.Join(srcDir, filename)
-			err := file.AtomicCopy(srcFilepath, targetDir, filename)
+			err := util.AtomicCopy(srcFilepath, targetDir, filename)
 			if err != nil {
 				return err
 			}

@@ -22,8 +22,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	mcp "istio.io/api/mcp/v1alpha1"
 	"istio.io/istio/pkg/mcp/status"
+
+	mcp "istio.io/api/mcp/v1alpha1"
 )
 
 func TestJournal(t *testing.T) {

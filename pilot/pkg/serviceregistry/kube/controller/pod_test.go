@@ -27,7 +27,6 @@ import (
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/config/labels"
-	"istio.io/istio/pkg/test/util/retry"
 )
 
 // Prepare k8s. This can be used in multiple tests, to
@@ -113,17 +112,13 @@ func TestIPReuse(t *testing.T) {
 	defer c.Stop()
 	initTestEnv(t, c.client, fx)
 
-	createPod := func(ip, name string) {
-		addPods(t, c, fx, generatePod(ip, name, "ns", "1", "", map[string]string{}, map[string]string{}))
-	}
-
-	createPod("128.0.0.1", "pod")
+	createPod(t, c, "128.0.0.1", "pod")
 	if p, f := c.pods.getPodKey("128.0.0.1"); !f || p != "ns/pod" {
 		t.Fatalf("unexpected pod: %v", p)
 	}
 
 	// Change the pod IP. This can happen if the pod moves to another node, for example.
-	createPod("128.0.0.2", "pod")
+	createPod(t, c, "128.0.0.2", "pod")
 	if p, f := c.pods.getPodKey("128.0.0.2"); !f || p != "ns/pod" {
 		t.Fatalf("unexpected pod: %v", p)
 	}
@@ -132,13 +127,13 @@ func TestIPReuse(t *testing.T) {
 	}
 
 	// A new pod is created with the old IP. We should get new-pod, not pod
-	createPod("128.0.0.1", "new-pod")
+	createPod(t, c, "128.0.0.1", "new-pod")
 	if p, f := c.pods.getPodKey("128.0.0.1"); !f || p != "ns/new-pod" {
 		t.Fatalf("unexpected pod: %v", p)
 	}
 
 	// A new pod is created with the same IP. In theory this should never happen, but maybe we miss an update somehow.
-	createPod("128.0.0.1", "another-pod")
+	createPod(t, c, "128.0.0.1", "another-pod")
 	if p, f := c.pods.getPodKey("128.0.0.1"); !f || p != "ns/another-pod" {
 		t.Fatalf("unexpected pod: %v", p)
 	}
@@ -157,8 +152,15 @@ func TestIPReuse(t *testing.T) {
 	}
 }
 
+func createPod(t *testing.T, c *FakeController, ip, name string) {
+	addPods(t, c, generatePod(ip, name, "ns", "1", "", map[string]string{}, map[string]string{}))
+	if err := waitForPod(c, ip); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitForPod(c *FakeController, ip string) error {
-	return wait.Poll(5*time.Millisecond, 1*time.Second, func() (bool, error) {
+	return wait.Poll(10*time.Millisecond, 5*time.Second, func() (bool, error) {
 		c.pods.RLock()
 		defer c.pods.RUnlock()
 		if _, ok := c.pods.podsByIP[ip]; ok {
@@ -166,13 +168,6 @@ func waitForPod(c *FakeController, ip string) error {
 		}
 		return false, nil
 	})
-}
-
-func waitForNode(c *FakeController, name string) error {
-	return retry.UntilSuccess(func() error {
-		_, err := c.nodeLister.Get(name)
-		return err
-	}, retry.Timeout(time.Second*1), retry.Delay(time.Millisecond*5))
 }
 
 func testPodCache(t *testing.T) {
@@ -191,7 +186,12 @@ func testPodCache(t *testing.T) {
 		generatePod("128.0.0.3", "cpod3", "nsb", "", "", map[string]string{"app": "prod-app-2"}, map[string]string{}),
 	}
 
-	addPods(t, c, fx, pods...)
+	for _, pod := range pods {
+		pod := pod
+		addPods(t, c, pod)
+		// Wait for the workload event
+		_ = waitForPod(c, pod.Status.PodIP)
+	}
 
 	// Verify podCache
 	wantLabels := map[string]labels.Instance{
@@ -227,7 +227,7 @@ func testPodCache(t *testing.T) {
 // Checks that events from the watcher create the proper internal structures
 func TestPodCacheEvents(t *testing.T) {
 	t.Parallel()
-	c, _ := NewFakeControllerWithOptions(FakeControllerOptions{Mode: EndpointsOnly})
+	c, fx := NewFakeControllerWithOptions(FakeControllerOptions{Mode: EndpointsOnly})
 	defer c.Stop()
 
 	ns := "default"
@@ -240,6 +240,9 @@ func TestPodCacheEvents(t *testing.T) {
 	if err := f(&v1.Pod{ObjectMeta: pod1}, model.EventAdd); err != nil {
 		t.Error(err)
 	}
+
+	// The first time pod occur
+	fx.Wait("xds")
 
 	if err := f(&v1.Pod{ObjectMeta: pod1, Status: v1.PodStatus{PodIP: ip, Phase: v1.PodPending}}, model.EventUpdate); err != nil {
 		t.Error(err)

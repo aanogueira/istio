@@ -27,8 +27,14 @@ import (
 	"time"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	discoveryv2 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v2"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+
+	"istio.io/istio/pilot/pkg/xds"
+	"istio.io/istio/pkg/security"
+	nodeagentutil "istio.io/istio/security/pkg/nodeagent/util"
+
+	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	sds "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	"github.com/golang/protobuf/ptypes"
 	"google.golang.org/grpc"
@@ -36,15 +42,13 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"istio.io/istio/pilot/pkg/xds"
-	"istio.io/istio/pkg/security"
 	"istio.io/istio/security/pkg/nodeagent/cache"
-	nodeagentutil "istio.io/istio/security/pkg/nodeagent/util"
 	"istio.io/pkg/log"
 )
 
 const (
 	// SecretType is used for secret discovery service to construct response.
+	SecretTypeV2 = "type.googleapis.com/envoy.api.v2.auth.Secret"
 	SecretTypeV3 = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret"
 
 	// credentialTokenHeaderKey is the header key in gPRC header which is used to
@@ -151,7 +155,7 @@ type Debug struct {
 	Clients []ClientDebug `json:"clients"`
 }
 
-// newSDSService creates Secret Discovery Service which implements envoy SDS API.
+// newSDSService creates Secret Discovery Service which implements envoy v2 SDS API.
 func newSDSService(st security.SecretManager,
 	secOpt *security.Options,
 	skipTokenVerification bool) *sdsservice {
@@ -179,6 +183,7 @@ func newSDSService(st security.SecretManager,
 // register adds the SDS handle to the grpc server
 func (s *sdsservice) register(rpcs *grpc.Server) {
 	sds.RegisterSecretDiscoveryServiceServer(rpcs, s)
+	discoveryv2.RegisterSecretDiscoveryServiceServer(rpcs, s.createV2Adapter())
 }
 
 // DebugInfo serializes the current sds client data into JSON for the debug endpoint
@@ -231,8 +236,6 @@ func (s *sdsservice) StreamSecrets(stream sds.SecretDiscoveryService_StreamSecre
 	con := newSDSConnection(stream)
 
 	go receiveThread(con, reqChannel, &receiveError)
-	totalActiveConnCounts.Increment()
-	defer totalActiveConnCounts.Decrement()
 
 	for {
 		// Block until a request is received.
@@ -307,6 +310,7 @@ func (s *sdsservice) StreamSecrets(stream sds.SecretDiscoveryService_StreamSecre
 			}
 
 			// Update metrics.
+			totalActiveConnCounts.Increment()
 			if discReq.ErrorDetail != nil {
 				totalSecretUpdateFailureCounts.Increment()
 				sdsServiceLog.Errorf("%s received error: %v. Will not respond until next secret update",
@@ -492,12 +496,6 @@ func clearStaledClients() {
 
 // NotifyProxy sends notification to proxy about secret update,
 // SDS will close streaming connection if secret is nil.
-// TODO: this method may have a race condition and a very confusing logic,
-// it may work if the push channel somehow prevents other secret rotations
-// happening in other go-routines from replacing the per-connection fields
-// while pushChannel happens. This may lead to lost secret rotations for
-// gateway. With SDS moving to istiod - it will no longer be an issue, may
-// be too risky to change this code.
 func NotifyProxy(connKey cache.ConnKey, secret *security.SecretItem) error {
 	conIDresourceNamePrefix := sdsLogPrefix(connKey.ResourceName)
 	sdsClientsMutex.Lock()
@@ -543,6 +541,7 @@ func recycleConnection(conID, resourceName string) {
 	staledClientKeys[key] = true
 
 	totalStaleConnCounts.Increment()
+	totalActiveConnCounts.Decrement()
 }
 
 func getResourceName(discReq *discovery.DiscoveryRequest) (string /*resourceName*/, error) {

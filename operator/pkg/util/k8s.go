@@ -15,8 +15,6 @@
 package util
 
 import (
-	"fmt"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -62,9 +60,4 @@ func DetectSupportedJWTPolicy(config *rest.Config) (JWTPolicy, error) {
 		}
 	}
 	return FirstPartyJWT, nil
-}
-
-// GKString differs from default representation of GroupKind
-func GKString(gvk schema.GroupKind) string {
-	return fmt.Sprintf("%s/%s", gvk.Group, gvk.Kind)
 }

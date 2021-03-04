@@ -238,47 +238,25 @@ typedConfig:
                           regex: .*/ns/.*/.*
             - orIds:
                 ids:
-                - remoteIp:
-                    addressPrefix: 172.18.4.0
-                    prefixLen: 22
-            - notId:
-                orIds:
-                  ids:
-                  - remoteIp:
-                      addressPrefix: 192.168.244.139
-                      prefixLen: 32
-            - orIds:
-                ids:
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 1.2.3.4
                     prefixLen: 32
             - notId:
                 orIds:
                   ids:
-                  - directRemoteIp:
+                  - sourceIp:
                       addressPrefix: 9.0.0.1
                       prefixLen: 32
             - orIds:
                 ids:
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 10.10.10.10
                     prefixLen: 32
             - notId:
                 orIds:
                   ids:
-                  - directRemoteIp:
+                  - sourceIp:
                       addressPrefix: 90.10.10.10
-                      prefixLen: 32
-            - orIds:
-                ids:
-                - remoteIp:
-                    addressPrefix: 192.168.3.3
-                    prefixLen: 32
-            - notId:
-                orIds:
-                  ids:
-                  - remoteIp:
-                      addressPrefix: 172.19.31.3
                       prefixLen: 32
             - orIds:
                 ids:

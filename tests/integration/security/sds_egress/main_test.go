@@ -1,4 +1,3 @@
-// +build integ
 //  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +19,7 @@ import (
 
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/istio"
+	"istio.io/istio/pkg/test/framework/components/pilot"
 	"istio.io/istio/pkg/test/framework/components/prometheus"
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
@@ -27,20 +27,24 @@ import (
 
 var (
 	inst istio.Instance
+	p    pilot.Instance
 	prom prometheus.Instance
 )
 
 func TestMain(m *testing.M) {
 	framework.
 		NewSuite(m).
-		RequireSingleCluster().
 		Skip("https://github.com/istio/istio/issues/17933").
 		Label(label.CustomSetup).
 
 		// SDS requires Kubernetes 1.13
 		RequireEnvironmentVersion("1.13").
-		Setup(istio.Setup(&inst, nil)).
+		RequireSingleCluster().
+		Setup(istio.Setup(&inst, setupConfig)).
 		Setup(func(ctx resource.Context) (err error) {
+			if p, err = pilot.New(ctx, pilot.Config{}); err != nil {
+				return err
+			}
 			if prom, err = prometheus.New(ctx, prometheus.Config{}); err != nil {
 				return err
 			}
@@ -50,3 +54,14 @@ func TestMain(m *testing.M) {
 
 }
 
+func setupConfig(cfg *istio.Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.ControlPlaneValues = `
+components:
+  gateways:
+    istio-egressgateway:
+      enabled: true
+`
+}

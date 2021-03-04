@@ -29,8 +29,6 @@ import (
 
 	"istio.io/istio/pkg/security"
 	"istio.io/istio/security/pkg/stsservice"
-	"istio.io/istio/security/pkg/util"
-	"istio.io/pkg/env"
 	"istio.io/pkg/log"
 )
 
@@ -54,8 +52,6 @@ var (
 	// within this period, refresh access token.
 	defaultGracePeriod = 300
 	GCEProvider        = "GoogleComputeEngine"
-	// GKEClusterURL is the URL to send requests to the token exchange service.
-	GKEClusterURL = env.RegisterStringVar("GKE_CLUSTER_URL", "", "The url of GKE cluster").Get()
 )
 
 // Plugin supports token exchange with Google OAuth 2.0 authorization server.
@@ -160,7 +156,7 @@ func (p *Plugin) useCachedToken() ([]byte, bool) {
 }
 
 // Construct the audience field for GetFederatedToken request.
-func (p *Plugin) constructAudience(subjectToken string) string {
+func (p *Plugin) constructAudience() string {
 	provider := ""
 	if p.credFetcher != nil {
 		provider = p.credFetcher.GetIdentityProvider()
@@ -168,28 +164,9 @@ func (p *Plugin) constructAudience(subjectToken string) string {
 	// For GKE, we do not register IdentityProvider explicitly. The provider name
 	// is GKEClusterURL by default.
 	if provider == "" {
-		if GKEClusterURL != "" {
-			provider = GKEClusterURL
-		} else {
-			pluginLog.Warn("GKE_CLUSTER_URL is not set, fallback to call metadata server to get identity provider")
-			provider = p.gkeClusterURL
-		}
+		provider = p.gkeClusterURL
 	}
-
-	var identityNS string
-	// Prefer to use the identity namespace from the token audience. The trust domain
-	// could configured differently from the identity namespace.
-	// Note the token exchange request would fail anyway if the identity namespace is not
-	// matched with the audience of the token.
-	if audiences, err := util.GetAud(subjectToken); len(audiences) == 1 && audiences[0] != "" {
-		identityNS = audiences[0]
-	} else {
-		pluginLog.Errorf("expect only 1 non-empty audience in token but found %v with error %v. Fallback to use trust domain %q as the identity namespace.",
-			audiences, err, p.trustDomain)
-		identityNS = p.trustDomain
-	}
-
-	return fmt.Sprintf("identitynamespace:%s:%s", identityNS, provider)
+	return fmt.Sprintf("identitynamespace:%s:%s", p.trustDomain, provider)
 }
 
 // constructFederatedTokenRequest returns an HTTP request for federated token.
@@ -209,7 +186,7 @@ func (p *Plugin) constructFederatedTokenRequest(parameters stsservice.StsRequest
 	if len(parameters.Scope) != 0 {
 		reqScope = parameters.Scope
 	}
-	aud := p.constructAudience(parameters.SubjectToken)
+	aud := p.constructAudience()
 	query := map[string]string{
 		"audience":           aud,
 		"grantType":          parameters.GrantType,

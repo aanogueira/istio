@@ -15,27 +15,17 @@
 #   limitations under the License.
 
 name=${1:-foo}
-ns=${2:-$name}
-sa=${3:-$name}
-tmp=${4:-""}
-san="spiffe://trust-domain-$name/ns/$ns/sa/$sa"
+san="spiffe://trust-domain-$name/ns/$name/sa/$name"
 
-DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+openssl genrsa -out "workload-$name-key.pem" 2048
 
-if [ ! -d "$DIR/$tmp" ]; then
-  mkdir "$DIR/$tmp"
-fi
-
-openssl genrsa -out "$DIR/$tmp/workload-$name-key.pem" 2048
-
-cat > "$DIR"/workload.cfg <<EOF
+cat > workload.cfg <<EOF
 [req]
 distinguished_name = req_distinguished_name
 req_extensions = v3_req
 x509_extensions = v3_req
 prompt = no
 [req_distinguished_name]
-countryName = US
 [v3_req]
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth, clientAuth
@@ -45,21 +35,15 @@ subjectAltName = critical, @alt_names
 URI = $san
 EOF
 
-openssl req -new -key "$DIR/$tmp/workload-$name-key.pem" -subj "/" -out "$DIR"/workload.csr -config "$DIR"/workload.cfg
+openssl req -new -key "workload-$name-key.pem" -subj "/" -out workload.csr -config workload.cfg
 
-openssl x509 -req -in "$DIR"/workload.csr -CA "$DIR"/ca-cert.pem -CAkey "$DIR"/ca-key.pem -CAcreateserial \
--out "$DIR/$tmp/workload-$name-cert.pem" -days 3650 -extensions v3_req -extfile "$DIR"/workload.cfg
+openssl x509 -req -in workload.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
+-out "workload-$name-cert.pem" -days 3650 -extensions v3_req -extfile workload.cfg
 
-cat "$DIR"/cert-chain.pem >> "$DIR/$tmp/workload-$name-cert.pem"
+cat cert-chain.pem >> "workload-$name-cert.pem"
 
 echo "Generated workload-$name-[cert|key].pem with URI SAN $san"
-openssl verify -CAfile <(cat "$DIR"/cert-chain.pem "$DIR"/root-cert.pem) "$DIR/$tmp/workload-$name-cert.pem"
+openssl verify -CAfile <(cat cert-chain.pem root-cert.pem) "workload-$name-cert.pem"
 
 # clean temporary files
-if [ -f "$DIR"/.srl ]; then
-  rm "$DIR"/.srl
-fi
-if [ -f "$DIR"/ca-cert.srl ]; then
-  rm "$DIR"/ca-cert.srl
-fi
-rm "$DIR"/workload.cfg "$DIR"/workload.csr
+rm ca-cert.srl workload.cfg workload.csr

@@ -20,20 +20,22 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	. "github.com/onsi/gomega"
+	"k8s.io/api/extensions/v1beta1"
+
+	"istio.io/istio/pkg/config/schema/resource"
+
 	appsV1 "k8s.io/api/apps/v1"
 	coreV1 "k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"istio.io/istio/galley/pkg/config/source/kube/rt"
 	"istio.io/istio/galley/pkg/config/testing/data"
 	"istio.io/istio/galley/pkg/config/testing/k8smeta"
-	"istio.io/istio/pkg/config"
 )
 
 func TestParse(t *testing.T) {
 	t.Run("Endpoints", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		input := data.GetEndpoints()
 
 		objMeta, objResource := parse(t, []byte(input), "", "Endpoints", "v1")
@@ -47,7 +49,7 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Namespace", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		input := data.GetNamespace()
 
 		objMeta, objResource := parse(t, []byte(input), "", "Namespace", "v1")
@@ -61,7 +63,7 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Ingress", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		input := data.GetIngress()
 
 		objMeta, objResource := parse(t, []byte(input), "extensions", "Ingress", "v1beta1")
@@ -75,7 +77,7 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Node", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		input := data.GetNode()
 
 		objMeta, objResource := parse(t, []byte(input), "", "Node", "v1")
@@ -89,7 +91,7 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Pod", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		input := data.GetPod()
 
 		objMeta, objResource := parse(t, []byte(input), "", "Pod", "v1")
@@ -103,7 +105,7 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Service", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		input := data.GetService()
 
 		objMeta, objResource := parse(t, []byte(input), "", "Service", "v1")
@@ -117,7 +119,7 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Deployment", func(t *testing.T) {
-		g := NewWithT(t)
+		g := NewGomegaWithT(t)
 		input := data.GetDeployment()
 
 		objMeta, objResource := parse(t, []byte(input), "apps", "Deployment", "v1")
@@ -139,13 +141,13 @@ func TestExtractObject(t *testing.T) {
 		t.Run(r.Resource().Kind(), func(t *testing.T) {
 			t.Run("WrongTypeShouldReturnNil", func(t *testing.T) {
 				out := a.ExtractObject(struct{}{})
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(out).To(BeNil())
 			})
 
 			t.Run("Success", func(t *testing.T) {
 				out := a.ExtractObject(empty(r.Resource().Kind()))
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(out).ToNot(BeNil())
 			})
 		})
@@ -159,13 +161,13 @@ func TestExtractResource(t *testing.T) {
 		t.Run(r.Resource().Kind(), func(t *testing.T) {
 			t.Run("WrongTypeShouldReturnNil", func(t *testing.T) {
 				_, err := a.ExtractResource(struct{}{})
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(err).NotTo(BeNil())
 			})
 
 			t.Run("Success", func(t *testing.T) {
 				out, err := a.ExtractResource(empty(r.Resource().Kind()))
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(err).To(BeNil())
 				g.Expect(out).ToNot(BeNil())
 			})
@@ -175,10 +177,10 @@ func TestExtractResource(t *testing.T) {
 
 func parse(t *testing.T, input []byte, group, kind, version string) (metaV1.Object, proto.Message) {
 	t.Helper()
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	pr := rt.DefaultProvider()
-	a := pr.GetAdapter(k8smeta.MustGet().KubeCollections().MustFindByGroupVersionKind(config.GroupVersionKind{
+	a := pr.GetAdapter(k8smeta.MustGet().KubeCollections().MustFindByGroupVersionKind(resource.GroupVersionKind{
 		Group:   group,
 		Version: version,
 		Kind:    kind,

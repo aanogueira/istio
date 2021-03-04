@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -35,17 +34,18 @@ import (
 )
 
 var (
-	count       int
-	timeout     time.Duration
-	qps         int
-	uds         string
-	headers     []string
-	msg         string
-	method      string
-	http2       bool
-	serverFirst bool
-	clientCert  string
-	clientKey   string
+	count      int
+	timeout    time.Duration
+	qps        int
+	url        string
+	uds        string
+	headerKey  string
+	headerVal  string
+	headers    string
+	msg        string
+	http2      bool
+	clientCert string
+	clientKey  string
 
 	caFile string
 
@@ -60,11 +60,10 @@ For Kubernetes, this can be run from a source pod via "kubectl exec" with the de
 In general, Echo's gRPC interface (ForwardEcho) should be preferred. This client is only needed in cases
 where the network configuration doesn't support gRPC to the source pod.'
 `,
-		Args:              cobra.ExactArgs(1),
 		PersistentPreRunE: configureLogging,
 		Run: func(cmd *cobra.Command, args []string) {
 			// Create a request from the flags.
-			request, err := getRequest(args[0])
+			request, err := getRequest()
 			if err != nil {
 				log.Fatala(err)
 				os.Exit(-1)
@@ -112,18 +111,19 @@ func init() {
 	rootCmd.PersistentFlags().IntVar(&count, "count", common.DefaultCount, "Number of times to make the request")
 	rootCmd.PersistentFlags().IntVar(&qps, "qps", 0, "Queries per second")
 	rootCmd.PersistentFlags().DurationVar(&timeout, "timeout", common.DefaultRequestTimeout, "Request timeout")
+	rootCmd.PersistentFlags().StringVar(&url, "url", "", "Specify URL")
 	rootCmd.PersistentFlags().StringVar(&uds, "uds", "",
 		"Specify the Unix Domain Socket to connect to")
-	rootCmd.PersistentFlags().StringSliceVarP(&headers, "header", "H", headers,
-		"A list of http headers (use Host for authority) - 'name: value', following curl syntax")
+	rootCmd.PersistentFlags().StringVar(&headerKey, "key", "",
+		"Header key (use Host for authority) - deprecated user headers instead")
+	rootCmd.PersistentFlags().StringVar(&headerVal, "val", "", "Header value - deprecated")
+	rootCmd.PersistentFlags().StringVar(&headers, "headers", "",
+		"A list of http headers (use Host for authority) - name:value[,name:value]*")
 	rootCmd.PersistentFlags().StringVar(&caFile, "ca", "/cert.crt", "CA root cert file")
 	rootCmd.PersistentFlags().StringVar(&msg, "msg", "HelloWorld",
 		"message to send (for websockets)")
-	rootCmd.PersistentFlags().StringVar(&method, "method", "", "method to use (for HTTP)")
 	rootCmd.PersistentFlags().BoolVar(&http2, "http2", false,
 		"send http requests as HTTP with prior knowledge")
-	rootCmd.PersistentFlags().BoolVar(&serverFirst, "server-first", false,
-		"Treat as a server first protocol; do not send request until magic string is received")
 	rootCmd.PersistentFlags().StringVar(&clientCert, "client-cert", "", "client certificate file to use for request")
 	rootCmd.PersistentFlags().StringVar(&clientKey, "client-key", "", "client certificate key file to use for request")
 
@@ -132,42 +132,39 @@ func init() {
 	cmd.AddFlags(rootCmd)
 }
 
-// Adds http scheme to and url if not set. This matches curl logic
-func defaultScheme(u string) string {
-	p, err := url.Parse(u)
-	if err != nil {
-		return u
-	}
-	if p.Scheme == "" {
-		return "http://" + u
-	}
-	return u
-}
-
-func getRequest(url string) (*proto.ForwardEchoRequest, error) {
+func getRequest() (*proto.ForwardEchoRequest, error) {
 	request := &proto.ForwardEchoRequest{
-		Url:           defaultScheme(url),
+		Url:           url,
 		TimeoutMicros: common.DurationToMicros(timeout),
 		Count:         int32(count),
 		Qps:           int32(qps),
 		Message:       msg,
 		Http2:         http2,
-		ServerFirst:   serverFirst,
-		Method:        method,
 	}
 
-	for _, header := range headers {
-		parts := strings.Split(header, ":")
-
-		// require name:value format
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid header format: %q (want name:value)", header)
-		}
-
+	// Old http add header - deprecated
+	if headerKey != "" {
 		request.Headers = append(request.Headers, &proto.Header{
-			Key:   parts[0],
-			Value: strings.Trim(parts[1], " "),
+			Key:   headerKey,
+			Value: headerVal,
 		})
+	}
+
+	if headers != "" {
+		headersList := strings.Split(headers, ",")
+		for _, header := range headersList {
+			parts := strings.Split(header, ":")
+
+			// require name:value format
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid header format: %q (want name:value)", header)
+			}
+
+			request.Headers = append(request.Headers, &proto.Header{
+				Key:   parts[0],
+				Value: parts[1],
+			})
+		}
 	}
 
 	if clientCert != "" && clientKey != "" {

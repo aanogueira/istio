@@ -33,6 +33,15 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+
+	"istio.io/istio/pilot/pkg/serviceregistry/memory"
+	"istio.io/istio/pkg/security"
+
+	"istio.io/istio/pilot/pkg/networking/util"
+	v2 "istio.io/istio/pilot/pkg/xds/v2"
+	v3 "istio.io/istio/pilot/pkg/xds/v3"
+	"istio.io/istio/pkg/config/schema/resource"
+
 	"github.com/envoyproxy/go-control-plane/pkg/conversion"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/gogo/protobuf/types"
@@ -45,15 +54,12 @@ import (
 
 	mcp "istio.io/api/mcp/v1alpha1"
 	"istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pilot/pkg/networking/util"
-	"istio.io/istio/pilot/pkg/serviceregistry/memory"
-	v3 "istio.io/istio/pilot/pkg/xds/v3"
-	"istio.io/istio/pkg/config"
-	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/istio/pkg/security"
 	"istio.io/istio/security/pkg/nodeagent/cache"
+
 	"istio.io/pkg/log"
+
+	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pkg/config/schema/collections"
 )
 
 // Config for the ADS connection.
@@ -66,8 +72,6 @@ type Config struct {
 
 	// Meta includes additional metadata for the node
 	Meta *pstruct.Struct
-
-	Locality *core.Locality
 
 	// NodeType defaults to sidecar. "ingress" and "router" are also supported.
 	NodeType string
@@ -82,7 +86,7 @@ type Config struct {
 	CertDir string
 
 	// Secrets is the interface used for getting keys and rootCA.
-	SecretManager security.SecretManager
+	Secrets security.SecretManager
 
 	// For getting the certificate, using same code as SDS server.
 	// Either the JWTPath or the certs must be present.
@@ -91,29 +95,27 @@ type Config struct {
 	// XDSSAN is the expected SAN of the XDS server. If not set, the ProxyConfig.DiscoveryAddress is used.
 	XDSSAN string
 
-	// XDSRootCAFile explicitly set the root CA to be used for the XDS connection.
-	// Mirrors Envoy file.
-	XDSRootCAFile string
-
-	// RootCert contains the XDS root certificate. Used mainly for tests, apps will normally use
-	// XDSRootCAFile
-	RootCert []byte
-
 	// InsecureSkipVerify skips client verification the server's certificate chain and host name.
 	InsecureSkipVerify bool
 
-	// InitialDiscoveryRequests is a list of resources to watch at first, represented as URLs (for new XDS resource naming)
+	// Watch is a list of resources to watch, represented as URLs (for new XDS resource naming)
 	// or type URLs.
-	InitialDiscoveryRequests []*discovery.DiscoveryRequest
+	Watch []string
 
-	// BackoffPolicy determines the reconnect policy. Based on MCP client.
+	// InitialReconnectDelay is the time to wait before attempting to reconnect.
+	// If empty reconnect will not be attempted.
+	// TODO: client will use exponential backoff to reconnect.
+	InitialReconnectDelay time.Duration
+
+	// backoffPolicy determines the reconnect policy. Based on MCP client.
 	BackoffPolicy backoff.BackOff
 
 	// ResponseHandler will be called on each DiscoveryResponse.
 	// TODO: mirror Generator, allow adding handler per type
 	ResponseHandler ResponseHandler
 
-	GrpcOpts []grpc.DialOption
+	// TODO: remove the duplication - all security settings belong here.
+	SecOpts *security.Options
 }
 
 // ADSC implements a basic client for ADS, for use in stress tests and tools
@@ -122,12 +124,8 @@ type ADSC struct {
 	// Stream is the GRPC connection stream, allowing direct GRPC send operations.
 	// Set after Dial is called.
 	stream discovery.AggregatedDiscoveryService_StreamAggregatedResourcesClient
-	// xds client used to create a stream
-	client discovery.AggregatedDiscoveryServiceClient
-	conn   *grpc.ClientConn
 
-	// Indicates if the ADSC client is closed
-	closed bool
+	conn *grpc.ClientConn
 
 	// NodeID is the node identity sent to Pilot.
 	nodeID string
@@ -193,14 +191,22 @@ type ADSC struct {
 	// sendNodeMeta is set to true if the connection is new - and we need to send node meta.,
 	sendNodeMeta bool
 
-	sync     map[string]time.Time
-	syncCh   chan string
-	Locality *core.Locality
+	sync   map[string]time.Time
+	syncCh chan string
 }
 
 type ResponseHandler interface {
 	HandleResponse(con *ADSC, response *discovery.DiscoveryResponse)
 }
+
+const (
+	typePrefix = "type.googleapis.com/envoy.api.v2."
+
+	// ListenerType is sent after clusters and endpoints.
+	ListenerType = typePrefix + "Listener"
+	// RouteType is sent after listeners.
+	routeType = typePrefix + "RouteConfiguration"
+)
 
 var (
 	adscLog = log.RegisterScope("adsc", "adsc debugging", 0)
@@ -211,28 +217,38 @@ var (
 // - get certificate using the Secret provider, if CertRequired
 // - connect to the XDS server specified in ProxyConfig
 // - send initial request for watched resources
-// - wait for response from XDS server
+// - wait for respose from XDS server
 // - on success, start a background thread to maintain the connection, with exp. backoff.
-func New(discoveryAddr string, opts *Config) (*ADSC, error) {
-	if opts == nil {
-		opts = &Config{}
-	}
-	// We want to recreate stream
+func New(proxyConfig *v1alpha1.ProxyConfig, opts *Config) (*ADSC, error) {
+	// We want to reconnect
 	if opts.BackoffPolicy == nil {
 		opts.BackoffPolicy = backoff.NewExponentialBackOff()
+	}
+
+	adsc, err := Dial(proxyConfig.DiscoveryAddress, "", opts)
+
+	return adsc, err
+}
+
+// Dial connects to a ADS server, with optional MTLS authentication if a cert dir is specified.
+func Dial(url string, certDir string, opts *Config) (*ADSC, error) {
+	if opts == nil {
+		opts = &Config{}
 	}
 	adsc := &ADSC{
 		Updates:     make(chan string, 100),
 		XDSUpdates:  make(chan *discovery.DiscoveryResponse, 100),
 		VersionInfo: map[string]string{},
-		url:         discoveryAddr,
+		url:         url,
 		Received:    map[string]*discovery.DiscoveryResponse{},
 		RecvWg:      sync.WaitGroup{},
 		cfg:         opts,
 		syncCh:      make(chan string, len(collections.Pilot.All())),
 		sync:        map[string]time.Time{},
 	}
-
+	if certDir != "" {
+		opts.CertDir = certDir
+	}
 	if opts.Namespace == "" {
 		opts.Namespace = "default"
 	}
@@ -246,44 +262,15 @@ func New(discoveryAddr string, opts *Config) (*ADSC, error) {
 		opts.Workload = "test-1"
 	}
 	adsc.Metadata = opts.Meta
-	adsc.Locality = opts.Locality
 
 	adsc.nodeID = fmt.Sprintf("%s~%s~%s.%s~%s.svc.cluster.local", opts.NodeType, opts.IP,
 		opts.Workload, opts.Namespace, opts.Namespace)
 
-	if err := adsc.Dial(); err != nil {
-		return nil, err
-	}
-
-	return adsc, nil
-}
-
-// Dial connects to a ADS server, with optional MTLS authentication if a cert dir is specified.
-func (a *ADSC) Dial() error {
-	opts := a.cfg
-
-	var err error
-	grpcDialOptions := opts.GrpcOpts
-	// If we need MTLS - CertDir or Secrets provider is set.
-	if len(opts.CertDir) > 0 || opts.SecretManager != nil {
-		tlsCfg, err := a.tlsConfig()
-		if err != nil {
-			return err
-		}
-		creds := credentials.NewTLS(tlsCfg)
-		grpcDialOptions = append(grpcDialOptions, grpc.WithTransportCredentials(creds))
-	}
-
-	if len(grpcDialOptions) == 0 {
-		// Only disable transport security if the user didn't supply custom dial options
-		grpcDialOptions = append(grpcDialOptions, grpc.WithInsecure())
-	}
-
-	a.conn, err = grpc.Dial(a.url, grpcDialOptions...)
-	if err != nil {
-		return err
-	}
-	return nil
+	// by default, we assume 1 goroutine decrements the waitgroup (go a.handleRecv()).
+	// for synchronizing when the goroutine finishes reading from the gRPC stream.
+	adsc.RecvWg.Add(1)
+	err := adsc.Run()
+	return adsc, err
 }
 
 // Returns a private IP address, or unspecified IP (0.0.0.0) if no IP is available
@@ -307,27 +294,43 @@ func getPrivateIPIfAvailable() net.IP {
 }
 
 func (a *ADSC) tlsConfig() (*tls.Config, error) {
-	var clientCerts []tls.Certificate
+	var clientCert tls.Certificate
 	var serverCABytes []byte
 	var err error
+	var certName string
 
-	var getClientCertificate = getClientCertFn(a.cfg)
+	if a.cfg.Secrets != nil {
+		tok, err := ioutil.ReadFile(a.cfg.JWTPath)
+		if err != nil {
+			log.Infof("Failed to get credential token: %v", err)
+			tok = []byte("")
+		}
 
-	// Load the root CAs
-	if a.cfg.RootCert != nil {
-		serverCABytes = a.cfg.RootCert
-	} else if a.cfg.XDSRootCAFile != "" {
-		serverCABytes, err = ioutil.ReadFile(a.cfg.XDSRootCAFile)
-	} else if a.cfg.SecretManager != nil {
+		certName = fmt.Sprintf("(generated from %s)", a.cfg.JWTPath)
+		key, err := a.cfg.Secrets.GenerateSecret(context.Background(), "agent",
+			cache.WorkloadKeyCertResourceName, string(tok))
+		if err != nil {
+			return nil, err
+		}
+		clientCert, err = tls.X509KeyPair(key.CertificateChain, key.PrivateKey)
+		if err != nil {
+			return nil, err
+		}
 		// This is a bit crazy - we could just use the file
-		rootCA, err := a.cfg.SecretManager.GenerateSecret(context.Background(), "agent",
-			cache.RootCertReqResourceName, "")
+		rootCA, err := a.cfg.Secrets.GenerateSecret(context.Background(), "agent",
+			cache.RootCertReqResourceName, string(tok))
 		if err != nil {
 			return nil, err
 		}
 
 		serverCABytes = rootCA.RootCert
-	} else if a.cfg.CertDir != "" {
+	} else {
+		certName = a.cfg.CertDir + "/cert-chain.pem"
+		clientCert, err = tls.LoadX509KeyPair(certName,
+			a.cfg.CertDir+"/key.pem")
+		if err != nil {
+			return nil, err
+		}
 		serverCABytes, err = ioutil.ReadFile(a.cfg.CertDir + "/root-cert.pem")
 		if err != nil {
 			return nil, err
@@ -339,17 +342,30 @@ func (a *ADSC) tlsConfig() (*tls.Config, error) {
 		return nil, err
 	}
 
+	// If we supply an expired cert to the server it will just close the connection
+	// without useful message.  If the cert is obviously bogus, refuse to use it.
+	now := time.Now()
+	for _, cert := range clientCert.Certificate {
+		cert, err := x509.ParseCertificate(cert)
+		if err == nil {
+			if now.After(cert.NotAfter) {
+				return nil, fmt.Errorf("certificate %s expired %v", certName, cert.NotAfter)
+			}
+		}
+	}
+
 	shost, _, _ := net.SplitHostPort(a.url)
 	if a.cfg.XDSSAN != "" {
 		shost = a.cfg.XDSSAN
 	}
-
 	return &tls.Config{
-		GetClientCertificate: getClientCertificate,
-		Certificates:         clientCerts,
-		RootCAs:              serverCAs,
-		ServerName:           shost,
-		InsecureSkipVerify:   a.cfg.InsecureSkipVerify,
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      serverCAs,
+		ServerName:   shost,
+		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			return nil
+		},
+		InsecureSkipVerify: a.cfg.InsecureSkipVerify,
 	}, nil
 }
 
@@ -357,32 +373,49 @@ func (a *ADSC) tlsConfig() (*tls.Config, error) {
 func (a *ADSC) Close() {
 	a.mutex.Lock()
 	_ = a.conn.Close()
-	a.closed = true
 	a.mutex.Unlock()
 }
 
-// Run will create a new stream using the existing grpc client connection and send the initial xds requests.
-// And then it will run a go routine receiving and handling xds response.
-// Note: it is non blocking
+// Run will run one connection to the ADS client.
 func (a *ADSC) Run() error {
 	var err error
-	a.client = discovery.NewAggregatedDiscoveryServiceClient(a.conn)
-	a.stream, err = a.client.StreamAggregatedResources(context.Background())
+	if len(a.cfg.CertDir) > 0 || a.cfg.Secrets != nil {
+		tlsCfg, err := a.tlsConfig()
+		if err != nil {
+			return err
+		}
+		creds := credentials.NewTLS(tlsCfg)
+
+		opts := []grpc.DialOption{
+			// Verify Pilot cert and service account
+			grpc.WithTransportCredentials(creds),
+		}
+		a.conn, err = grpc.Dial(a.url, opts...)
+		if err != nil {
+			return err
+		}
+	} else {
+		a.conn, err = grpc.Dial(a.url, grpc.WithInsecure())
+		if err != nil {
+			return err
+		}
+	}
+
+	xds := discovery.NewAggregatedDiscoveryServiceClient(a.conn)
+	edsstr, err := xds.StreamAggregatedResources(context.Background())
 	if err != nil {
 		return err
 	}
+	a.stream = edsstr
 	a.sendNodeMeta = true
-	a.InitialLoad = 0
+
 	// Send the initial requests
-	for _, r := range a.cfg.InitialDiscoveryRequests {
-		if r.TypeUrl == v3.ClusterType {
-			a.watchTime = time.Now()
-		}
-		_ = a.Send(r)
+	for _, r := range a.cfg.Watch {
+		_ = a.Send(&discovery.DiscoveryRequest{
+			TypeUrl: r,
+		})
 	}
-	// by default, we assume 1 goroutine decrements the waitgroup (go a.handleRecv()).
-	// for synchronizing when the goroutine finishes reading from the gRPC stream.
-	a.RecvWg.Add(1)
+
 	go a.handleRecv()
 	return nil
 }
@@ -394,22 +427,14 @@ func (a *ADSC) hasSynced() bool {
 		t := a.sync[s.Resource().GroupVersionKind().String()]
 		a.mutex.RUnlock()
 		if t.IsZero() {
-			log.Warnf("Not synced: %v", s.Resource().GroupVersionKind().String())
+			log.Warn("NOT SYNCE" + s.Resource().GroupVersionKind().String())
 			return false
 		}
 	}
 	return true
 }
 
-// reconnect will create a new stream
 func (a *ADSC) reconnect() {
-	a.mutex.RLock()
-	if a.closed {
-		a.mutex.RUnlock()
-		return
-	}
-	a.mutex.RUnlock()
-
 	err := a.Run()
 	if err == nil {
 		a.cfg.BackoffPolicy.Reset()
@@ -423,12 +448,12 @@ func (a *ADSC) handleRecv() {
 		var err error
 		msg, err := a.stream.Recv()
 		if err != nil {
-			a.RecvWg.Done()
 			adscLog.Infof("Connection closed for node %v with err: %v", a.nodeID, err)
 			// if 'reconnect' enabled - schedule a new Run
 			if a.cfg.BackoffPolicy != nil {
 				time.AfterFunc(a.cfg.BackoffPolicy.NextBackOff(), a.reconnect)
 			} else {
+				a.RecvWg.Done()
 				a.Close()
 				a.WaitClear()
 				a.Updates <- ""
@@ -478,22 +503,30 @@ func (a *ADSC) handleRecv() {
 			a.VersionInfo[rsc.TypeUrl] = msg.VersionInfo
 			valBytes := rsc.Value
 			switch rsc.TypeUrl {
-			case v3.ListenerType:
-				ll := &listener.Listener{}
-				_ = proto.Unmarshal(valBytes, ll)
-				listeners = append(listeners, ll)
-			case v3.ClusterType:
-				cl := &cluster.Cluster{}
-				_ = proto.Unmarshal(valBytes, cl)
-				clusters = append(clusters, cl)
-			case v3.EndpointType:
-				el := &endpoint.ClusterLoadAssignment{}
-				_ = proto.Unmarshal(valBytes, el)
-				eds = append(eds, el)
-			case v3.RouteType:
-				rl := &route.RouteConfiguration{}
-				_ = proto.Unmarshal(valBytes, rl)
-				routes = append(routes, rl)
+			case v2.ListenerType, v3.ListenerType:
+				{
+					ll := &listener.Listener{}
+					_ = proto.Unmarshal(valBytes, ll)
+					listeners = append(listeners, ll)
+				}
+			case v2.ClusterType, v3.ClusterType:
+				{
+					cl := &cluster.Cluster{}
+					_ = proto.Unmarshal(valBytes, cl)
+					clusters = append(clusters, cl)
+				}
+			case v2.EndpointType, v3.EndpointType:
+				{
+					el := &endpoint.ClusterLoadAssignment{}
+					_ = proto.Unmarshal(valBytes, el)
+					eds = append(eds, el)
+				}
+			case v2.RouteType, v3.RouteType:
+				{
+					rl := &route.RouteConfiguration{}
+					_ = proto.Unmarshal(valBytes, rl)
+					routes = append(routes, rl)
+				}
 			default:
 				err = a.handleMCP(gvk, rsc, valBytes)
 				if err != nil {
@@ -506,27 +539,28 @@ func (a *ADSC) handleRecv() {
 		// This scheme also allows us to chunk large responses !
 
 		// TODO: add hook to inject nacks
-		switch msg.TypeUrl {
-		case v3.ClusterType:
-			a.handleCDS(clusters)
-		case v3.EndpointType:
-			a.handleEDS(eds)
-		case v3.ListenerType:
-			a.handleLDS(listeners)
-		case v3.RouteType:
-			a.handleRDS(routes)
-		}
 
 		a.mutex.Lock()
 		if len(gvk) == 3 {
-			gt := config.GroupVersionKind{Group: gvk[0], Version: gvk[1], Kind: gvk[2]}
+			gt := resource.GroupVersionKind{Group: gvk[0], Version: gvk[1], Kind: gvk[2]}
 			a.sync[gt.String()] = time.Now()
-			a.syncCh <- gt.String()
 		}
 		a.Received[msg.TypeUrl] = msg
 		a.ack(msg)
 		a.mutex.Unlock()
 
+		if len(listeners) > 0 {
+			a.handleLDS(listeners)
+		}
+		if len(clusters) > 0 {
+			a.handleCDS(clusters)
+		}
+		if len(eds) > 0 {
+			a.handleEDS(eds)
+		}
+		if len(routes) > 0 {
+			a.handleRDS(routes)
+		}
 		select {
 		case a.XDSUpdates <- msg:
 		default:
@@ -534,12 +568,12 @@ func (a *ADSC) handleRecv() {
 	}
 }
 
-func mcpToPilot(m *mcp.Resource) (*config.Config, error) {
+func mcpToPilot(m *mcp.Resource) (*model.Config, error) {
 	if m == nil || m.Metadata == nil {
-		return &config.Config{}, nil
+		return &model.Config{}, nil
 	}
-	c := &config.Config{
-		Meta: config.Meta{
+	c := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			ResourceVersion: m.Metadata.Version,
 			Labels:          m.Metadata.Labels,
 			Annotations:     m.Metadata.Annotations,
@@ -593,6 +627,9 @@ func (a *ADSC) handleLDS(ll []*listener.Listener) {
 			filter = l.FilterChains[len(l.FilterChains)-2].Filters[0]
 		}
 
+		if filter.Name == "mixer" {
+			filter = l.FilterChains[len(l.FilterChains)-1].Filters[1]
+		}
 		if filter.Name == wellknown.TCPProxy {
 			lt[l.Name] = l
 			config, _ := conversion.MessageToStruct(filter.GetTypedConfig())
@@ -628,13 +665,13 @@ func (a *ADSC) handleLDS(ll []*listener.Listener) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	if len(routes) > 0 {
-		a.sendRsc(v3.RouteType, routes)
+		a.sendRsc(routeType, routes)
 	}
 	a.httpListeners = lh
 	a.tcpListeners = lt
 
 	select {
-	case a.Updates <- v3.ListenerType:
+	case a.Updates <- "lds":
 	default:
 	}
 }
@@ -697,7 +734,7 @@ func (a *ADSC) Save(base string) error {
 
 func (a *ADSC) handleCDS(ll []*cluster.Cluster) {
 
-	cn := make([]string, 0, len(ll))
+	cn := []string{}
 	cdsSize := 0
 	edscds := map[string]*cluster.Cluster{}
 	cds := map[string]*cluster.Cluster{}
@@ -730,15 +767,14 @@ func (a *ADSC) handleCDS(ll []*cluster.Cluster) {
 	a.clusters = cds
 
 	select {
-	case a.Updates <- v3.ClusterType:
+	case a.Updates <- "cds":
 	default:
 	}
 }
 
 func (a *ADSC) node() *core.Node {
 	n := &core.Node{
-		Id:       a.nodeID,
-		Locality: a.Locality,
+		Id: a.nodeID,
 	}
 	if a.Metadata == nil {
 		n.Metadata = &pstruct.Struct{
@@ -783,7 +819,7 @@ func (a *ADSC) handleEDS(eds []*endpoint.ClusterLoadAssignment) {
 		// first load - Envoy loads listeners after endpoints
 		_ = a.stream.Send(&discovery.DiscoveryRequest{
 			Node:    a.node(),
-			TypeUrl: v3.ListenerType,
+			TypeUrl: ListenerType,
 		})
 	}
 
@@ -792,7 +828,7 @@ func (a *ADSC) handleEDS(eds []*endpoint.ClusterLoadAssignment) {
 	a.eds = la
 
 	select {
-	case a.Updates <- v3.EndpointType:
+	case a.Updates <- "eds":
 	default:
 	}
 }
@@ -834,7 +870,7 @@ func (a *ADSC) handleRDS(configurations []*route.RouteConfiguration) {
 	a.mutex.Unlock()
 
 	select {
-	case a.Updates <- v3.RouteType:
+	case a.Updates <- "rds":
 	default:
 	}
 
@@ -852,33 +888,6 @@ func (a *ADSC) WaitClear() {
 	}
 }
 
-// WaitSingle waits for a single resource, and fails if the rejected type is
-// returned. We avoid rejecting all other types to avoid race conditions. For
-// example, a test asserting an incremental update of EDS may fail if a previous
-// push's RDS response comes in later. Instead, we can reject events coming
-// before (ie CDS). The only real alternative is to wait which introduces its own
-// issues.
-func (a *ADSC) WaitSingle(to time.Duration, want string, reject string) error {
-	t := time.NewTimer(to)
-	for {
-		select {
-		case t := <-a.Updates:
-			if t == "" {
-				return fmt.Errorf("closed")
-			}
-			if t != want && t == reject {
-				return fmt.Errorf("wanted update for %v got %v", want, t)
-			}
-			if t == want {
-				return nil
-			}
-			continue
-		case <-t.C:
-			return fmt.Errorf("timeout, still waiting for update for %v", want)
-		}
-	}
-}
-
 // Wait for an updates for all the specified types
 // If updates is empty, this will wait for any update
 func (a *ADSC) Wait(to time.Duration, updates ...string) ([]string, error) {
@@ -890,12 +899,24 @@ func (a *ADSC) Wait(to time.Duration, updates ...string) ([]string, error) {
 	got := make([]string, 0, len(updates))
 	for {
 		select {
-		case toDelete := <-a.Updates:
-			if toDelete == "" {
+		case t := <-a.Updates:
+			if t == "" {
 				return got, fmt.Errorf("closed")
 			}
+			toDelete := t
+			// legacy names, still used in tests.
+			switch t {
+			case ListenerType:
+				delete(want, "lds")
+			case v3.ClusterType:
+				delete(want, "cds")
+			case v3.EndpointType:
+				delete(want, "eds")
+			case routeType:
+				delete(want, "rds")
+			}
 			delete(want, toDelete)
-			got = append(got, toDelete)
+			got = append(got, t)
 			if len(want) == 0 {
 				return got, nil
 			}
@@ -944,14 +965,6 @@ func (a *ADSC) EndpointsJSON() string {
 	return string(out)
 }
 
-func XdsInitialRequests() []*discovery.DiscoveryRequest {
-	return []*discovery.DiscoveryRequest{
-		{
-			TypeUrl: v3.ClusterType,
-		},
-	}
-}
-
 // Watch will start watching resources, starting with CDS. Based on the CDS response
 // it will start watching RDS and LDS.
 func (a *ADSC) Watch() {
@@ -960,20 +973,6 @@ func (a *ADSC) Watch() {
 		Node:    a.node(),
 		TypeUrl: v3.ClusterType,
 	})
-}
-
-func ConfigInitialRequests() []*discovery.DiscoveryRequest {
-	out := make([]*discovery.DiscoveryRequest, 0, len(collections.Pilot.All())+1)
-	out = append(out, &discovery.DiscoveryRequest{
-		TypeUrl: collections.IstioMeshV1Alpha1MeshConfig.Resource().GroupVersionKind().String(),
-	})
-	for _, sch := range collections.Pilot.All() {
-		out = append(out, &discovery.DiscoveryRequest{
-			TypeUrl: sch.Resource().GroupVersionKind().String(),
-		})
-	}
-
-	return out
 }
 
 // WatchConfig will use the new experimental API watching, similar with MCP.
@@ -1031,18 +1030,14 @@ func (a *ADSC) sendRsc(typeurl string, rsc []string) {
 }
 
 func (a *ADSC) ack(msg *discovery.DiscoveryResponse) {
+	stype := v3.GetShortType(msg.TypeUrl)
 	var resources []string
-	if msg.TypeUrl == v3.EndpointType {
+	// TODO: Send routes also in future.
+	if stype == v3.EndpointShortType {
 		for c := range a.edsClusters {
 			resources = append(resources, c)
 		}
 	}
-	if msg.TypeUrl == v3.RouteType {
-		for r := range a.routes {
-			resources = append(resources, r)
-		}
-	}
-
 	_ = a.stream.Send(&discovery.DiscoveryRequest{
 		ResponseNonce: msg.Nonce,
 		TypeUrl:       msg.TypeUrl,
@@ -1115,7 +1110,7 @@ func (a *ADSC) handleMCP(gvk []string, rsc *any.Any, valBytes []byte) error {
 		adscLog.Warna("Invalid data ", err, " ", string(valBytes))
 		return err
 	}
-	val.GroupVersionKind = config.GroupVersionKind{Group: gvk[0], Version: gvk[1], Kind: gvk[2]}
+	val.GroupVersionKind = resource.GroupVersionKind{Group: gvk[0], Version: gvk[1], Kind: gvk[2]}
 	cfg := a.Store.Get(val.GroupVersionKind, val.Name, val.Namespace)
 	if cfg == nil {
 		_, err = a.Store.Create(*val)

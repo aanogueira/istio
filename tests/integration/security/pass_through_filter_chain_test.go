@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,6 +26,8 @@ import (
 	epb "istio.io/istio/pkg/test/echo/proto"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
+	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/test/util/tmpl"
@@ -36,9 +37,11 @@ import (
 func TestPassThroughFilterChain(t *testing.T) {
 	framework.
 		NewTest(t).
-		Features("security.filterchain").
 		Run(func(ctx framework.TestContext) {
-			ns := apps.Namespace1
+			ns := namespace.NewOrFail(t, ctx, namespace.Config{
+				Prefix: "pass-through-filter-chain",
+				Inject: true,
+			})
 			args := map[string]string{
 				"Namespace": ns.Name(),
 			}
@@ -47,173 +50,206 @@ func TestPassThroughFilterChain(t *testing.T) {
 			ctx.Config().ApplyYAMLOrFail(t, ns.Name(), policies...)
 			defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), policies...)
 
-			for _, cluster := range ctx.Clusters() {
-				a := apps.A.Match(echo.Namespace(ns.Name())).GetOrFail(ctx, echo.InCluster(cluster))
-				b := apps.B.Match(echo.Namespace(ns.Name())).GetOrFail(ctx, echo.InCluster(cluster))
-				c := apps.C.Match(echo.Namespace(ns.Name())).GetOrFail(ctx, echo.InCluster(cluster))
-				d := apps.D.Match(echo.Namespace(ns.Name())).GetOrFail(ctx, echo.InCluster(cluster))
-
-				cases := []struct {
-					target echo.Instance
-					port   int
-					schema protocol.Instance
-					want   bool
-				}{
-					// For workload a, there is no authN/authZ policy.
-					// All requests should success, this is to verify the pass through filter chain and
-					// the workload ports are working correctly.
-					{
-						target: a,
-						port:   8085,
-						schema: protocol.HTTP,
-						want:   true,
+			newEchoConfig := func(service string) echo.Config {
+				return echo.Config{
+					Service:   service,
+					Namespace: ns,
+					Subsets:   []echo.SubsetConfig{{}},
+					Ports: []echo.Port{
+						{
+							Name:     "grpc",
+							Protocol: protocol.GRPC,
+						},
 					},
-					{
-						target: a,
-						port:   8086,
-						schema: protocol.HTTP,
-						want:   true,
-					},
-					{
-						target: a,
-						port:   8087,
-						schema: protocol.TCP,
-						want:   true,
-					},
-					{
-						target: a,
-						port:   8088,
-						schema: protocol.TCP,
-						want:   true,
-					},
-
-					// For workload b, there is only authZ policy that allows access to port 8085 and 8087.
-					// Only request to port 8085, 8087 should be allowed.
-					{
-						target: b,
-						port:   8085,
-						schema: protocol.HTTP,
-						want:   true,
-					},
-					{
-						target: b,
-						port:   8086,
-						schema: protocol.HTTP,
-						want:   false,
-					},
-					{
-						target: b,
-						port:   8087,
-						schema: protocol.TCP,
-						want:   true,
-					},
-					{
-						target: b,
-						port:   8088,
-						schema: protocol.TCP,
-						want:   false,
-					},
-
-					// For workload c, there is only authN policy that enables mTLS (Strict).
-					// The request should be denied because the e is always using plain text.
-					{
-						target: c,
-						port:   8085,
-						schema: protocol.HTTP,
-						want:   false,
-					},
-					{
-						target: c,
-						port:   8086,
-						schema: protocol.HTTP,
-						want:   false,
-					},
-					{
-						target: c,
-						port:   8087,
-						schema: protocol.TCP,
-						want:   false,
-					},
-					{
-						target: c,
-						port:   8088,
-						schema: protocol.TCP,
-						want:   false,
-					},
-
-					// For workload d, there is only authN policy that enables mTLS (Permissive).
-					// The request should be allowed because the e is always using plain text.
-					{
-						target: d,
-						port:   8085,
-						schema: protocol.HTTP,
-						want:   true,
-					},
-					{
-						target: d,
-						port:   8086,
-						schema: protocol.HTTP,
-						want:   true,
-					},
-					{
-						target: d,
-						port:   8087,
-						schema: protocol.TCP,
-						want:   true,
-					},
-					{
-						target: d,
-						port:   8088,
-						schema: protocol.TCP,
-						want:   true,
+					// The port 8085,8086,8087,8088 will be defined only in the workload and not in the k8s service.
+					WorkloadOnlyPorts: []echo.WorkloadPort{
+						{
+							Port:     8085,
+							Protocol: protocol.HTTP,
+						},
+						{
+							Port:     8086,
+							Protocol: protocol.HTTP,
+						},
+						{
+							Port:     8087,
+							Protocol: protocol.TCP,
+						},
+						{
+							Port:     8088,
+							Protocol: protocol.TCP,
+						},
 					},
 				}
-				ctx.NewSubTest(fmt.Sprintf("In %s", cluster.Name())).Run(func(ctx framework.TestContext) {
-					for _, tc := range cases {
-						name := fmt.Sprintf("E->%s:%d[%t]", tc.target.Config().Service, tc.port, tc.want)
-						e := apps.E.Match(echo.InCluster(cluster)).GetOrFail(ctx, echo.Namespace(ns.Name()))
-						from := getWorkload(e, t)
-						// The request should be handled by the pass through filter chain.
-						host := fmt.Sprintf("%s:%d", getWorkload(tc.target, t).Address(), tc.port)
-						request := &epb.ForwardEchoRequest{
-							Url:     fmt.Sprintf("%s://%s", tc.schema, host),
-							Message: "HelloWorld",
-							Headers: []*epb.Header{
-								{
-									Key:   "Host",
-									Value: host,
-								},
-							},
-						}
-						ctx.NewSubTest(name).Run(func(ctx framework.TestContext) {
-							retry.UntilSuccessOrFail(t, func() error {
-								responses, err := from.ForwardEcho(context.TODO(), request)
-								if tc.want {
-									if err != nil {
-										return fmt.Errorf("want allow but got error: %v", err)
-									}
-									if len(responses) < 1 {
-										return fmt.Errorf("received no responses from request to %s", host)
-									}
-									if tc.schema == protocol.HTTP && response.StatusCodeOK != responses[0].Code {
-										return fmt.Errorf("want status %s but got %s", response.StatusCodeOK, responses[0].Code)
-									}
-								} else {
-									// Check HTTP forbidden response
-									if len(responses) >= 1 && response.StatusCodeForbidden == responses[0].Code {
-										return nil
-									}
+			}
 
-									if err == nil || !strings.Contains(err.Error(), "EOF") {
-										return fmt.Errorf("want error EOF but got: %v", err)
-									}
-								}
+			var x, a, b, c, d echo.Instance
+			echoboot.NewBuilderOrFail(t, ctx).
+				With(&x, newEchoConfig("x")).
+				With(&a, newEchoConfig("a")).
+				With(&b, newEchoConfig("b")).
+				With(&c, newEchoConfig("c")).
+				With(&d, newEchoConfig("d")).
+				BuildOrFail(t)
+
+			cases := []struct {
+				target echo.Instance
+				port   int
+				schema protocol.Instance
+				want   bool
+			}{
+				// For workload a, there is no authN/authZ policy.
+				// All requests should success, this is to verify the pass through filter chain and
+				// the workload ports are working correctly.
+				{
+					target: a,
+					port:   8085,
+					schema: protocol.HTTP,
+					want:   true,
+				},
+				{
+					target: a,
+					port:   8086,
+					schema: protocol.HTTP,
+					want:   true,
+				},
+				{
+					target: a,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   true,
+				},
+				{
+					target: a,
+					port:   8088,
+					schema: protocol.TCP,
+					want:   true,
+				},
+
+				// For workload b, there is only authZ policy that allows access to port 8085 and 8087.
+				// Only request to port 8085, 8087 should be allowed.
+				{
+					target: b,
+					port:   8085,
+					schema: protocol.HTTP,
+					want:   true,
+				},
+				{
+					target: b,
+					port:   8086,
+					schema: protocol.HTTP,
+					want:   false,
+				},
+				{
+					target: b,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   true,
+				},
+				{
+					target: b,
+					port:   8088,
+					schema: protocol.TCP,
+					want:   false,
+				},
+
+				// For workload c, there is only authN policy that enables mTLS (Strict).
+				// The request should be denied because the x is always using plain text.
+				{
+					target: c,
+					port:   8085,
+					schema: protocol.HTTP,
+					want:   false,
+				},
+				{
+					target: c,
+					port:   8086,
+					schema: protocol.HTTP,
+					want:   false,
+				},
+				{
+					target: c,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   false,
+				},
+				{
+					target: c,
+					port:   8088,
+					schema: protocol.TCP,
+					want:   false,
+				},
+
+				// For workload d, there is only authN policy that enables mTLS (Permissive).
+				// The request should be allowed because the x is always using plain text.
+				{
+					target: d,
+					port:   8085,
+					schema: protocol.HTTP,
+					want:   true,
+				},
+				{
+					target: d,
+					port:   8086,
+					schema: protocol.HTTP,
+					want:   true,
+				},
+				{
+					target: d,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   true,
+				},
+				{
+					target: d,
+					port:   8088,
+					schema: protocol.TCP,
+					want:   true,
+				},
+			}
+
+			for _, tc := range cases {
+				name := fmt.Sprintf("x->%s:%d[%t]", tc.target.Config().Service, tc.port, tc.want)
+				from := getWorkload(a, t)
+				// The request should be handled by the pass through filter chain.
+				host := fmt.Sprintf("%s:%d", getWorkload(tc.target, t).Address(), tc.port)
+				request := &epb.ForwardEchoRequest{
+					Url:     fmt.Sprintf("%s://%s", tc.schema, host),
+					Count:   1,
+					Message: "HelloWorld",
+					Headers: []*epb.Header{
+						{
+							Key:   "Host",
+							Value: host,
+						},
+					},
+				}
+				t.Run(name, func(t *testing.T) {
+					retry.UntilSuccessOrFail(t, func() error {
+						responses, err := from.ForwardEcho(context.TODO(), request)
+						if tc.want {
+							if err != nil {
+								return fmt.Errorf("want allow but got error: %v", err)
+							}
+							if len(responses) < 1 {
+								return fmt.Errorf("received no responses from request to %s", host)
+							}
+							if tc.schema == protocol.HTTP && response.StatusCodeOK != responses[0].Code {
+								return fmt.Errorf("want status %s but got %s", response.StatusCodeOK, responses[0].Code)
+							}
+						} else {
+							// Check HTTP forbidden response
+							if len(responses) >= 1 && response.StatusCodeForbidden == responses[0].Code {
 								return nil
-							}, retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second))
-						})
-					}
-				})
+							}
 
+							if err == nil || !strings.Contains(err.Error(), "EOF") {
+								return fmt.Errorf("want error EOF but got: %v", err)
+							}
+						}
+						return nil
+					}, retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second))
+				})
 			}
 		})
 }

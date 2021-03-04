@@ -56,7 +56,7 @@ func (ctx *context) ForEach(collection.Name, IteratorFn)                        
 func (ctx *context) Canceled() bool                                             { return false }
 
 func TestCombinedAnalyzer(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	col1 := newSchema("col1")
 	col2 := newSchema("col2")
@@ -90,7 +90,7 @@ func TestCombinedAnalyzer(t *testing.T) {
 }
 
 func TestGetDisabledOutputs(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	in1 := newSchema("in1")
 	in2 := newSchema("in2")

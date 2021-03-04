@@ -18,13 +18,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gogo/protobuf/types"
 	. "github.com/onsi/gomega"
 
 	"istio.io/istio/galley/pkg/config/testing/data"
 	"istio.io/istio/pkg/config/event"
 	"istio.io/istio/pkg/config/resource"
 	"istio.io/istio/pkg/config/schema/collection"
+
+	"github.com/gogo/protobuf/types"
 )
 
 func TestEvent_String(t *testing.T) {
@@ -68,7 +69,7 @@ func TestEvent_String(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run("", func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 			actual := tc.i.String()
 			g.Expect(strings.TrimSpace(actual)).To(Equal(strings.TrimSpace(tc.exp)))
 		})
@@ -116,7 +117,7 @@ func TestEvent_DetailedString(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run("", func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 			actual := tc.i.String()
 			actual = strings.TrimSpace(actual)
 			expected := strings.TrimSpace(tc.prefix)
@@ -126,7 +127,7 @@ func TestEvent_DetailedString(t *testing.T) {
 }
 
 func TestEvent_Clone(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	r := resource.Instance{
 		Metadata: resource.Metadata{
@@ -145,7 +146,7 @@ func TestEvent_Clone(t *testing.T) {
 }
 
 func TestEvent_FullSyncFor(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	e := event.FullSyncFor(data.Boo)
 
@@ -157,7 +158,7 @@ func TestEvent_FullSyncFor(t *testing.T) {
 }
 
 func TestEvent_AddFor(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	r := resource.Instance{
 		Metadata: resource.Metadata{
@@ -181,7 +182,7 @@ func TestEvent_AddFor(t *testing.T) {
 }
 
 func TestEvent_UpdateFor(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	r := resource.Instance{
 		Metadata: resource.Metadata{
@@ -205,7 +206,7 @@ func TestEvent_UpdateFor(t *testing.T) {
 }
 
 func TestEvent_DeleteFor(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	n := resource.NewFullName("ns1", "rs1")
 	v := resource.Version("v1")
@@ -225,7 +226,7 @@ func TestEvent_DeleteFor(t *testing.T) {
 }
 
 func TestEvent_UpdateForResource(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	r := resource.Instance{
 		Metadata: resource.Metadata{
@@ -249,7 +250,7 @@ func TestEvent_UpdateForResource(t *testing.T) {
 }
 
 func TestEvent_IsSource(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	e := event.Event{
 		Kind:   event.Deleted,
 		Source: data.Boo,
@@ -259,7 +260,7 @@ func TestEvent_IsSource(t *testing.T) {
 }
 
 func TestEvent_IsSourceAny(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	e := event.Event{
 		Kind:   event.Deleted,
 		Source: data.Boo,
@@ -270,7 +271,7 @@ func TestEvent_IsSourceAny(t *testing.T) {
 }
 
 func TestEvent_WithSource(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	oldCol := data.Boo
 	e := event.Event{
 		Kind:   event.Deleted,
@@ -283,7 +284,7 @@ func TestEvent_WithSource(t *testing.T) {
 }
 
 func TestEvent_WithSource_Reset(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	e := event.Event{
 		Kind: event.Reset,
 	}

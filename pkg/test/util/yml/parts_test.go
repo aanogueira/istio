@@ -23,7 +23,7 @@ import (
 )
 
 func TestEmptyDoc(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	yaml := `
 `
@@ -83,7 +83,7 @@ b
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			parts := yml.SplitString(c.doc)
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 			g.Expect(parts).To(Equal(expected))
 		})
 	}
@@ -103,7 +103,7 @@ b
     b2`,
 	}
 
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	parts := yml.SplitString(doc)
 	g.Expect(parts).To(Equal(expected))
 }
@@ -129,7 +129,7 @@ b
 ---
 b`
 
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	doc := yml.JoinString(parts...)
 	g.Expect(doc).To(Equal(expected))
 }

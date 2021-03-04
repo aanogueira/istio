@@ -15,13 +15,14 @@
 package version
 
 import (
-	pkgversion "istio.io/istio/operator/pkg/version"
 	buildversion "istio.io/pkg/version"
+
+	pkgversion "istio.io/istio/operator/pkg/version"
 )
 
 const (
 	// OperatorCodeBaseVersion is the version string from the code base.
-	OperatorCodeBaseVersion = "1.8.0"
+	OperatorCodeBaseVersion = "1.7.0"
 )
 
 var (

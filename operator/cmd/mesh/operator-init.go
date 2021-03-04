@@ -40,13 +40,19 @@ type operatorInitArgs struct {
 
 func addOperatorInitFlags(cmd *cobra.Command, args *operatorInitArgs) {
 	hub, tag := buildversion.DockerInfo.Hub, buildversion.DockerInfo.Tag
-
-	cmd.PersistentFlags().StringVarP(&args.inFilename, "filename", "f", "", filenameFlagHelpStr)
-	cmd.PersistentFlags().StringVarP(&args.kubeConfigPath, "kubeconfig", "c", "", KubeConfigFlagHelpStr)
-	cmd.PersistentFlags().StringVar(&args.context, "context", "", ContextFlagHelpStr)
-	cmd.PersistentFlags().StringVar(&args.common.hub, "hub", hub, HubFlagHelpStr)
-	cmd.PersistentFlags().StringVar(&args.common.tag, "tag", tag, TagFlagHelpStr)
-	cmd.PersistentFlags().StringVar(&args.common.operatorNamespace, "operatorNamespace", operatorDefaultNamespace, OperatorNamespaceHelpstr)
+	if hub == "" {
+		hub = "gcr.io/istio-testing"
+	}
+	if tag == "" {
+		tag = "latest"
+	}
+	cmd.PersistentFlags().StringVarP(&args.inFilename, "filename", "f", "", "Path to file containing IstioOperator custom resource")
+	cmd.PersistentFlags().StringVarP(&args.kubeConfigPath, "kubeconfig", "c", "", "Path to kube config")
+	cmd.PersistentFlags().StringVar(&args.context, "context", "", "The name of the kubeconfig context to use")
+	cmd.PersistentFlags().StringVar(&args.common.hub, "hub", hub, "The hub for the operator controller image")
+	cmd.PersistentFlags().StringVar(&args.common.tag, "tag", tag, "The tag for the operator controller image")
+	cmd.PersistentFlags().StringVar(&args.common.operatorNamespace, "operatorNamespace", operatorDefaultNamespace,
+		"The namespace the operator controller is installed into")
 	cmd.PersistentFlags().StringVar(&args.common.istioNamespace, "istioNamespace", istioDefaultNamespace,
 		"The namespace Istio is installed into. Deprecated, use '--watchedNamespaces' instead.")
 	cmd.PersistentFlags().StringVar(&args.common.watchedNamespaces, "watchedNamespaces", istioDefaultNamespace,
@@ -80,15 +86,10 @@ func operatorInit(args *rootArgs, oiArgs *operatorInitArgs, l clog.Logger) {
 	// Error here likely indicates Deployment is missing. If some other K8s error, we will hit it again later.
 	already, _ := isControllerInstalled(clientset, oiArgs.common.operatorNamespace, oiArgs.common.revision)
 	if already {
-		l.LogAndPrintf("Operator controller is already installed in %s namespace.", oiArgs.common.operatorNamespace)
-		l.LogAndPrintf("Upgrading operator controller in namespace: %s using image: %s/operator:%s",
-			oiArgs.common.operatorNamespace, oiArgs.common.hub, oiArgs.common.tag)
-	} else {
-		l.LogAndPrintf("Installing operator controller in namespace: %s using image: %s/operator:%s",
-			oiArgs.common.operatorNamespace, oiArgs.common.hub, oiArgs.common.tag)
+		l.LogAndPrintf("Operator controller is already installed in %s namespace, updating.", oiArgs.common.operatorNamespace)
 	}
 
-	l.LogAndPrintf("Operator controller will watch namespaces: %s", oiArgs.common.watchedNamespaces)
+	l.LogAndPrintf("Using operator Deployment image: %s/operator:%s", oiArgs.common.hub, oiArgs.common.tag)
 
 	vals, mstr, err := renderOperatorManifest(args, &oiArgs.common)
 	if err != nil {

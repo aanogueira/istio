@@ -18,7 +18,6 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	cors "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/cors/v3"
 	fault "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/fault/v3"
-	grpcstats "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_stats/v3"
 	grpcweb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_web/v3"
 	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	httpinspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/http_inspector/v3"
@@ -27,7 +26,6 @@ import (
 	tlsinspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"istio.io/istio/pilot/pkg/networking/util"
 	alpn "istio.io/istio/pkg/envoy/config/filter/http/alpn/v2alpha1"
@@ -40,9 +38,6 @@ const (
 
 	// DNSListenerFilterName is the name of UDP listener filter for resolving DNS queries
 	DNSListenerFilterName = "envoy.filters.udp.dns_filter"
-
-	TLSTransportProtocol       = "tls"
-	RawBufferTransportProtocol = "raw_buffer"
 )
 
 // Define static filters to be reused across the codebase. This avoids duplicate marshaling/unmarshaling
@@ -70,17 +65,6 @@ var (
 		Name: wellknown.GRPCWeb,
 		ConfigType: &hcm.HttpFilter_TypedConfig{
 			TypedConfig: util.MessageToAny(&grpcweb.GrpcWeb{}),
-		},
-	}
-	GrpcStats = &hcm.HttpFilter{
-		Name: wellknown.HTTPGRPCStats,
-		ConfigType: &hcm.HttpFilter_TypedConfig{
-			TypedConfig: util.MessageToAny(&grpcstats.FilterConfig{
-				EmitFilterState: true,
-				PerMethodStatSpecifier: &grpcstats.FilterConfig_StatsForAllMethods{
-					StatsForAllMethods: &wrapperspb.BoolValue{Value: false},
-				},
-			}),
 		},
 	}
 	TLSInspector = &listener.ListenerFilter{

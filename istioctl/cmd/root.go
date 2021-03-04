@@ -32,7 +32,6 @@ import (
 	"istio.io/istio/operator/cmd/mesh"
 	"istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
 	"istio.io/istio/pkg/cmd"
-	"istio.io/istio/tools/bug-report/pkg/bugreport"
 	"istio.io/pkg/collateral"
 	"istio.io/pkg/env"
 	"istio.io/pkg/log"
@@ -50,12 +49,6 @@ func (c CommandParseError) Error() string {
 const (
 	// Location to read istioctl defaults from
 	defaultIstioctlConfig = "$HOME/.istioctl/config.yaml"
-
-	//deprection messages to be suffixed to the deprecated commands
-	deprecatedMsg = "[Deprecated, it will be removed in Istio 1.9]"
-
-	// ExperimentalMsg indicate active development and not for production use warning.
-	ExperimentalMsg = `THIS COMMAND IS UNDER ACTIVE DEVELOPMENT AND NOT READY FOR PRODUCTION USE.`
 )
 
 var (
@@ -93,7 +86,6 @@ func defaultLogOptions() *log.Options {
 	o.SetOutputLevel("translator", log.WarnLevel)
 	o.SetOutputLevel("adsc", log.WarnLevel)
 	o.SetOutputLevel("default", log.WarnLevel)
-	o.SetOutputLevel("klog", log.WarnLevel)
 
 	return o
 }
@@ -141,7 +133,7 @@ func GetRootCmd(args []string) *cobra.Command {
 		Long: `Istio configuration command line utility for service operators to
 debug and diagnose their Istio mesh.
 `,
-		PersistentPreRunE: configureLogging,
+		PersistentPreRunE: istioPersistentPreRunE,
 	}
 
 	rootCmd.SetArgs(args)
@@ -167,10 +159,8 @@ debug and diagnose their Istio mesh.
 	}
 
 	cmd.AddFlags(rootCmd)
-	registerCmd := register()
-	deprecate(registerCmd)
-	rootCmd.AddCommand(registerCmd)
-	deprecate(deregisterCmd)
+
+	rootCmd.AddCommand(register())
 	rootCmd.AddCommand(deregisterCmd)
 	rootCmd.AddCommand(injectCommand())
 
@@ -216,7 +206,10 @@ debug and diagnose their Istio mesh.
 
 	rootCmd.AddCommand(experimentalCmd)
 	rootCmd.AddCommand(proxyConfig())
-	experimentalCmd.AddCommand(istiodConfig())
+
+	rootCmd.AddCommand(convertIngress())
+	rootCmd.AddCommand(dashboard())
+	rootCmd.AddCommand(Analyze())
 
 	rootCmd.AddCommand(install.NewVerifyCommand())
 	experimentalCmd.AddCommand(install.NewPrecheckCommand())
@@ -227,59 +220,35 @@ debug and diagnose their Istio mesh.
 	experimentalCmd.AddCommand(describe())
 	experimentalCmd.AddCommand(addToMeshCmd())
 	experimentalCmd.AddCommand(removeFromMeshCmd())
-	vmBootstrapCmd := vmBootstrapCommand()
-	deprecate(vmBootstrapCmd)
-	experimentalCmd.AddCommand(vmBootstrapCmd)
+	experimentalCmd.AddCommand(softGraduatedCmd(Analyze()))
+	experimentalCmd.AddCommand(vmBootstrapCommand())
 	experimentalCmd.AddCommand(waitCmd())
 	experimentalCmd.AddCommand(mesh.UninstallCmd(loggingOptions))
 	experimentalCmd.AddCommand(configCmd())
-	postInstallWebhookCmd := Webhook()
-	deprecate(postInstallWebhookCmd)
-	postInstallCmd.AddCommand(postInstallWebhookCmd)
-	experimentalCmd.AddCommand(workloadCommands())
+
+	postInstallCmd.AddCommand(Webhook())
 	experimentalCmd.AddCommand(postInstallCmd)
 
-	analyzeCmd := Analyze()
-	hideInheritedFlags(analyzeCmd, "istioNamespace")
-	rootCmd.AddCommand(analyzeCmd)
-
-	convertIngressCmd := convertIngress()
-	deprecate(convertIngressCmd)
-	hideInheritedFlags(convertIngressCmd, "namespace", "istioNamespace")
-	rootCmd.AddCommand(convertIngressCmd)
-
-	dashboardCmd := dashboard()
-	hideInheritedFlags(dashboardCmd, "namespace", "istioNamespace")
-	rootCmd.AddCommand(dashboardCmd)
-
 	manifestCmd := mesh.ManifestCmd(loggingOptions)
-	hideInheritedFlags(manifestCmd, "namespace", "istioNamespace", "charts")
+	hideInheritedFlags(manifestCmd, "namespace", "istioNamespace")
 	rootCmd.AddCommand(manifestCmd)
-
 	operatorCmd := mesh.OperatorCmd()
-	hideInheritedFlags(operatorCmd, "charts")
 	rootCmd.AddCommand(operatorCmd)
-
 	installCmd := mesh.InstallCmd(loggingOptions)
-	hideInheritedFlags(installCmd, "namespace", "istioNamespace", "charts")
+	hideInheritedFlags(installCmd, "namespace", "istioNamespace")
 	rootCmd.AddCommand(installCmd)
 
 	profileCmd := mesh.ProfileCmd()
-	hideInheritedFlags(profileCmd, "namespace", "istioNamespace", "charts")
+	hideInheritedFlags(profileCmd, "namespace", "istioNamespace")
 	rootCmd.AddCommand(profileCmd)
 
 	upgradeCmd := mesh.UpgradeCmd()
-	hideInheritedFlags(upgradeCmd, "namespace", "istioNamespace", "charts")
+	hideInheritedFlags(upgradeCmd, "namespace", "istioNamespace")
+	experimentalCmd.AddCommand(softGraduatedCmd(upgradeCmd))
 	rootCmd.AddCommand(upgradeCmd)
 
-	bugReportCmd := bugreport.Cmd(loggingOptions)
-	hideInheritedFlags(bugReportCmd, "namespace", "istioNamespace")
-	rootCmd.AddCommand(bugReportCmd)
-
 	experimentalCmd.AddCommand(multicluster.NewCreateRemoteSecretCommand())
-	multiclusterCmd := multicluster.NewMulticlusterCommand()
-	deprecate(multiclusterCmd)
-	experimentalCmd.AddCommand(multiclusterCmd)
+	experimentalCmd.AddCommand(multicluster.NewMulticlusterCommand())
 
 	rootCmd.AddCommand(collateral.CobraCommand(rootCmd, &doc.GenManHeader{
 		Title:   "Istio Control",
@@ -287,10 +256,7 @@ debug and diagnose their Istio mesh.
 		Manual:  "Istio Control",
 	}))
 
-	validateCmd := validate.NewValidateCommand(&istioNamespace)
-	hideInheritedFlags(validateCmd, "kubeconfig")
-	rootCmd.AddCommand(validateCmd)
-
+	rootCmd.AddCommand(validate.NewValidateCommand(&istioNamespace))
 	rootCmd.AddCommand(optionsCommand(rootCmd))
 
 	// BFS apply the flag error function to all subcommands
@@ -328,7 +294,7 @@ func hideInheritedFlags(orig *cobra.Command, hidden ...string) {
 	})
 }
 
-func configureLogging(_ *cobra.Command, _ []string) error {
+func istioPersistentPreRunE(_ *cobra.Command, _ []string) error {
 	if err := log.Configure(loggingOptions); err != nil {
 		return err
 	}
@@ -368,10 +334,21 @@ func getDefaultNamespace(kubeconfig string) string {
 	return context.Namespace
 }
 
+// softGraduatedCmd is used for commands that have graduated, but we still want the old invocation to work.
+func softGraduatedCmd(cmd *cobra.Command) *cobra.Command {
+	msg := fmt.Sprintf("(%s has graduated. Use `istioctl %s`)", cmd.Name(), cmd.Name())
+
+	newCmd := *cmd
+	newCmd.Short = fmt.Sprintf("%s %s", cmd.Short, msg)
+	newCmd.RunE = func(c *cobra.Command, args []string) error {
+		fmt.Fprintln(cmd.ErrOrStderr(), msg)
+		return cmd.RunE(c, args)
+	}
+
+	return &newCmd
+}
+
 // seeExperimentalCmd is used for commands that have been around for a release but not graduated
-// Other alternative
-// for graduatedCmd see https://github.com/istio/istio/pull/26408
-// for softGraduatedCmd see https://github.com/istio/istio/pull/26563
 func seeExperimentalCmd(name string) *cobra.Command {
 	msg := fmt.Sprintf("(%s is experimental. Use `istioctl experimental %s`)", name, name)
 	return &cobra.Command{
@@ -381,9 +358,4 @@ func seeExperimentalCmd(name string) *cobra.Command {
 			return errors.New(msg)
 		},
 	}
-}
-
-// deprecate adds a suffix to command to indicate the command as Deprecated.
-func deprecate(cmd *cobra.Command) {
-	cmd.Short += " " + deprecatedMsg
 }

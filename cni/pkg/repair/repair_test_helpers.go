@@ -17,8 +17,6 @@ package repair
 import (
 	v1 "k8s.io/api/core/v1"
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"istio.io/istio/tools/istio-iptables/pkg/constants"
 )
 
 type makePodArgs struct {
@@ -79,7 +77,7 @@ func makePod(args makePodArgs) *v1.Pod {
 // Container specs
 var (
 	brokenInitContainerWaiting = v1.ContainerStatus{
-		Name: constants.ValidationContainerName,
+		Name: ValidationContainerName,
 		State: v1.ContainerState{
 			Waiting: &v1.ContainerStateWaiting{
 				Reason:  "CrashLoopBackOff",
@@ -88,7 +86,7 @@ var (
 		},
 		LastTerminationState: v1.ContainerState{
 			Terminated: &v1.ContainerStateTerminated{
-				ExitCode: constants.ValidationErrorCode,
+				ExitCode: 126,
 				Reason:   "Error",
 				Message:  "Died for some reason",
 			},
@@ -96,17 +94,17 @@ var (
 	}
 
 	brokenInitContainerTerminating = v1.ContainerStatus{
-		Name: constants.ValidationContainerName,
+		Name: ValidationContainerName,
 		State: v1.ContainerState{
 			Terminated: &v1.ContainerStateTerminated{
-				ExitCode: constants.ValidationErrorCode,
+				ExitCode: 126,
 				Reason:   "Error",
 				Message:  "Died for some reason",
 			},
 		},
 		LastTerminationState: v1.ContainerState{
 			Terminated: &v1.ContainerStateTerminated{
-				ExitCode: constants.ValidationErrorCode,
+				ExitCode: 126,
 				Reason:   "Error",
 				Message:  "Died for some reason",
 			},
@@ -114,7 +112,7 @@ var (
 	}
 
 	workingInitContainerDiedPreviously = v1.ContainerStatus{
-		Name: constants.ValidationContainerName,
+		Name: ValidationContainerName,
 		State: v1.ContainerState{
 			Terminated: &v1.ContainerStateTerminated{
 				ExitCode: 0,
@@ -131,7 +129,7 @@ var (
 	}
 
 	workingInitContainer = v1.ContainerStatus{
-		Name: constants.ValidationContainerName,
+		Name: ValidationContainerName,
 		State: v1.ContainerState{
 			Terminated: &v1.ContainerStateTerminated{
 				ExitCode: 0,

@@ -15,13 +15,14 @@
 package injection
 
 import (
-	"fmt"
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
 
-	"istio.io/api/annotation"
 	"istio.io/api/label"
+
+	"istio.io/api/annotation"
+
 	"istio.io/istio/galley/pkg/config/analysis"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/util"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
@@ -72,26 +73,16 @@ func (a *Analyzer) Analyze(c analysis.Context) {
 			// TODO: if Istio is installed with sidecarInjectorWebhook.enableNamespacesByDefault=true
 			// (in the istio-sidecar-injector configmap), we need to reverse this logic and treat this as an injected namespace
 
-			m := msg.NewNamespaceNotInjected(r, ns, ns)
-
-			if line, ok := util.ErrorLine(r, fmt.Sprintf(util.MetadataName)); ok {
-				m.Line = line
-			}
-
-			c.Report(collections.K8SCoreV1Namespaces.Name(), m)
+			c.Report(collections.K8SCoreV1Namespaces.Name(), msg.NewNamespaceNotInjected(r, r.Metadata.FullName.String(), r.Metadata.FullName.String()))
 			return true
 		}
 
 		if okNewInjectionLabel {
 			if injectionLabel != "" {
-
-				m := msg.NewNamespaceMultipleInjectionLabels(r, ns, ns)
-
-				if line, ok := util.ErrorLine(r, fmt.Sprintf(util.MetadataName)); ok {
-					m.Line = line
-				}
-
-				c.Report(collections.K8SCoreV1Namespaces.Name(), m)
+				c.Report(collections.K8SCoreV1Namespaces.Name(),
+					msg.NewNamespaceMultipleInjectionLabels(r,
+						r.Metadata.FullName.String(),
+						r.Metadata.FullName.String()))
 				return true
 			}
 		} else if injectionLabel != util.InjectionLabelEnableValue {
@@ -99,7 +90,7 @@ func (a *Analyzer) Analyze(c analysis.Context) {
 			return true
 		}
 
-		injectedNamespaces[ns] = true
+		injectedNamespaces[r.Metadata.FullName.String()] = true
 
 		return true
 	})

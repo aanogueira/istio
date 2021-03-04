@@ -2,11 +2,9 @@
 auth:
   strategy: anonymous
 deployment:
-  pod_annotations:
-    sidecar.istio.io/inject: "false"
   accessible_namespaces:
   - '**'
-  image_version: v1.26
+  image_version: v1.22
   ingress_enabled: false
 login_token:
   signing_key: CHANGEME

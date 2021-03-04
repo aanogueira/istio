@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	ConnectionTimeout     = 2 * time.Second
+	ConnectionTimeout     = time.Second * 2
 	DefaultRequestTimeout = 15 * time.Second
 	DefaultCount          = 1
 )

@@ -28,8 +28,9 @@ lint-dockerfiles:
 lint-scripts:
 	@${FINDFILES} -name '*.sh' -print0 | ${XARGS} shellcheck
 
+# TODO(nmittler): disabled pipefail due to grep failing when no files contain "{{". Need to investigate options.
 lint-yaml:
-	@${FINDFILES} \( -name '*.yml' -o -name '*.yaml' \) -not -exec grep -q -e "{{" {} \; -print0 | ${XARGS} yamllint -c ./common/config/.yamllint.yml
+	@set +o pipefail; ${FINDFILES} \( -name '*.yml' -o -name '*.yaml' \) -print0 | ${XARGS} grep -L -e "{{" | xargs -r yamllint -c ./common/config/.yamllint.yml
 
 lint-helm:
 	@${FINDFILES} -name 'Chart.yaml' -print0 | ${XARGS} -L 1 dirname | xargs -r helm lint --strict
@@ -63,8 +64,8 @@ lint-typescript:
 lint-protos:
 	@if test -d common-protos; then $(FINDFILES) -name '*.proto' -print0 | $(XARGS) -L 1 prototool lint --protoc-bin-path=/usr/bin/protoc --protoc-wkt-path=common-protos; fi
 
-lint-licenses:
-	@if test -d licenses; then license-lint --config common/config/license-lint.yml; fi
+lint-licenses: mod-download-go
+	@license-lint --config common/config/license-lint.yml
 
 lint-all: lint-dockerfiles lint-scripts lint-yaml lint-helm lint-copyright-banner lint-go lint-python lint-markdown lint-sass lint-typescript lint-protos lint-licenses
 
@@ -75,7 +76,7 @@ mod-download-go:
 	@-GOFLAGS="-mod=readonly" go mod download
 
 format-go: tidy-go
-	@${FINDFILES} -name '*.go' \( ! \( -name '*.gen.go' -o -name '*.pb.go' \) \) -print0 | ${XARGS} common/scripts/format_go.sh
+	@${FINDFILES} -name '*.go' \( ! \( -name '*.gen.go' -o -name '*.pb.go' \) \) -print0 | ${XARGS} goimports -w -local "istio.io"
 
 format-python:
 	@${FINDFILES} -name '*.py' -print0 | ${XARGS} autopep8 --max-line-length 160 --aggressive --aggressive -i
@@ -94,7 +95,7 @@ mirror-licenses: mod-download-go
 	@license-lint --mirror
 
 TMP := $(shell mktemp -d -u)
-UPDATE_BRANCH ?= "release-1.8"
+UPDATE_BRANCH ?= "release-1.7"
 
 update-common:
 	@mkdir -p $(TMP)

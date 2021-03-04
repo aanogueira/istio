@@ -24,13 +24,15 @@ import (
 	"github.com/gogo/protobuf/types"
 	. "github.com/onsi/gomega"
 
+	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/config/schema/resource"
+
 	mcpapi "istio.io/api/mcp/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/mcp"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/mcp/sink"
 )
 
@@ -98,11 +100,12 @@ var (
 
 	testControllerOptions = &mcp.Options{
 		DomainSuffix: "cluster.local",
+		ConfigLedger: &model.DisabledLedger{},
 	}
 )
 
 func TestOptions(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	controller := mcp.NewController(testControllerOptions)
 
@@ -126,31 +129,31 @@ func TestOptions(t *testing.T) {
 }
 
 func TestHasSynced(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	g.Expect(controller.HasSynced()).To(BeFalse())
 }
 
 func TestConfigDescriptor(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 	schemas := controller.Schemas()
 	g.Expect(schemas.CollectionNames()).Should(ConsistOf(collections.Pilot.CollectionNames()))
 }
 
 func TestListInvalidType(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
-	c, err := controller.List(config.GroupVersionKind{Kind: "bad-type"}, "some-phony-name-space.com")
+	c, err := controller.List(resource.GroupVersionKind{Kind: "bad-type"}, "some-phony-name-space.com")
 	g.Expect(c).To(BeNil())
 	g.Expect(err).To(HaveOccurred())
 	g.Expect(err.Error()).To(ContainSubstring("list unknown type"))
 }
 
 func TestListCorrectTypeNoData(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	c, err := controller.List(gvk.VirtualService,
@@ -160,7 +163,7 @@ func TestListCorrectTypeNoData(t *testing.T) {
 }
 
 func TestListAllNameSpace(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	fx := NewFakeXDS()
 	testControllerOptions.XDSUpdater = fx
@@ -201,7 +204,7 @@ func TestListAllNameSpace(t *testing.T) {
 }
 
 func TestListSpecificNameSpace(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	messages := convertToResources(g,
@@ -236,7 +239,7 @@ func TestListSpecificNameSpace(t *testing.T) {
 }
 
 func TestApplyInvalidType(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	message := convertToResource(g,
@@ -254,7 +257,7 @@ func TestApplyInvalidType(t *testing.T) {
 }
 
 func TestApplyValidTypeWithNoNamespace(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	var createAndCheckGateway = func(g *GomegaWithT, controller mcp.Controller, port uint32) {
@@ -297,7 +300,7 @@ func TestApplyValidTypeWithNoNamespace(t *testing.T) {
 }
 
 func TestApplyMetadataNameIncludesNamespace(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	message := convertToResource(g,
@@ -321,7 +324,7 @@ func TestApplyMetadataNameIncludesNamespace(t *testing.T) {
 }
 
 func TestApplyMetadataNameWithoutNamespace(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	message := convertToResource(g,
@@ -345,7 +348,7 @@ func TestApplyMetadataNameWithoutNamespace(t *testing.T) {
 }
 
 func TestApplyChangeNoObjects(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	fx := NewFakeXDS()
 	testControllerOptions.XDSUpdater = fx
@@ -382,7 +385,7 @@ func TestApplyChangeNoObjects(t *testing.T) {
 }
 
 func TestApplyConfigUpdate(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	fx := NewFakeXDS()
 	testControllerOptions.XDSUpdater = fx
@@ -405,7 +408,7 @@ func TestApplyConfigUpdate(t *testing.T) {
 }
 
 func TestInvalidResource(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	gw := proto.Clone(gateway).(*networking.Gateway)
@@ -428,7 +431,7 @@ func TestInvalidResource(t *testing.T) {
 }
 
 func TestInvalidResource_BadTimestamp(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	controller := mcp.NewController(testControllerOptions)
 
 	message := convertToResource(g, collections.IstioNetworkingV1Alpha3Gateways.Resource().Proto(), gateway)
@@ -458,12 +461,12 @@ func TestEventHandler(t *testing.T) {
 		return namespace + "/" + name
 	}
 
-	gotEvents := map[model.Event]map[string]config.Config{
+	gotEvents := map[model.Event]map[string]model.Config{
 		model.EventAdd:    {},
 		model.EventUpdate: {},
 		model.EventDelete: {},
 	}
-	controller.RegisterEventHandler(gvk.ServiceEntry, func(_, m config.Config, e model.Event) {
+	controller.RegisterEventHandler(gvk.ServiceEntry, func(_, m model.Config, e model.Event) {
 		gotEvents[e][makeName(m.Namespace, m.Name)] = m
 	})
 
@@ -492,9 +495,9 @@ func TestEventHandler(t *testing.T) {
 		}
 	}
 
-	makeServiceEntryModel := func(name, host, version string) config.Config {
-		return config.Config{
-			Meta: config.Meta{
+	makeServiceEntryModel := func(name, host, version string) model.Config {
+		return model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind:  gvk.ServiceEntry,
 				Name:              name,
 				Namespace:         "default",
@@ -512,7 +515,7 @@ func TestEventHandler(t *testing.T) {
 	steps := []struct {
 		name   string
 		change *sink.Change
-		want   map[model.Event]map[string]config.Config
+		want   map[model.Event]map[string]model.Config
 	}{
 		{
 			name: "initial add",
@@ -522,7 +525,7 @@ func TestEventHandler(t *testing.T) {
 					makeServiceEntry("foo", "foo.com", "v0"),
 				},
 			},
-			want: map[model.Event]map[string]config.Config{
+			want: map[model.Event]map[string]model.Config{
 				model.EventAdd: {
 					"default/foo": makeServiceEntryModel("foo", "foo.com", "v0"),
 				},
@@ -536,7 +539,7 @@ func TestEventHandler(t *testing.T) {
 					makeServiceEntry("foo", "foo.com", "v1"),
 				},
 			},
-			want: map[model.Event]map[string]config.Config{
+			want: map[model.Event]map[string]model.Config{
 				model.EventUpdate: {
 					"default/foo": makeServiceEntryModel("foo", "foo.com", "v1"),
 				},
@@ -551,7 +554,7 @@ func TestEventHandler(t *testing.T) {
 					makeServiceEntry("foo1", "foo1.com", "v0"),
 				},
 			},
-			want: map[model.Event]map[string]config.Config{
+			want: map[model.Event]map[string]model.Config{
 				model.EventAdd: {
 					"default/foo1": makeServiceEntryModel("foo1", "foo1.com", "v0"),
 				},
@@ -565,7 +568,7 @@ func TestEventHandler(t *testing.T) {
 					makeServiceEntry("foo1", "foo1.com", "v0"),
 				},
 			},
-			want: map[model.Event]map[string]config.Config{
+			want: map[model.Event]map[string]model.Config{
 				model.EventDelete: {
 					"default/foo": makeServiceEntryModel("foo", "foo.com", "v1"),
 				},
@@ -581,7 +584,7 @@ func TestEventHandler(t *testing.T) {
 					makeServiceEntry("foo3", "foo3.com", "v0"),
 				},
 			},
-			want: map[model.Event]map[string]config.Config{
+			want: map[model.Event]map[string]model.Config{
 				model.EventAdd: {
 					"default/foo2": makeServiceEntryModel("foo2", "foo2.com", "v0"),
 					"default/foo3": makeServiceEntryModel("foo3", "foo3.com", "v0"),
@@ -602,7 +605,7 @@ func TestEventHandler(t *testing.T) {
 					makeServiceEntry("foo5", "foo5.com", "v0"),
 				},
 			},
-			want: map[model.Event]map[string]config.Config{
+			want: map[model.Event]map[string]model.Config{
 				model.EventAdd: {
 					"default/foo4": makeServiceEntryModel("foo4", "foo4.com", "v0"),
 					"default/foo5": makeServiceEntryModel("foo5", "foo5.com", "v0"),
@@ -630,7 +633,7 @@ func TestEventHandler(t *testing.T) {
 				}
 			}
 			// clear saved events after every step
-			gotEvents = map[model.Event]map[string]config.Config{
+			gotEvents = map[model.Event]map[string]model.Config{
 				model.EventAdd:    {},
 				model.EventUpdate: {},
 				model.EventDelete: {},
@@ -707,10 +710,12 @@ var _ model.XDSUpdater = &FakeXdsUpdater{}
 type FakeXdsUpdater struct {
 	Events    chan string
 	Endpoints chan []*model.IstioEndpoint
+	EDSErr    chan error
 }
 
 func NewFakeXDS() *FakeXdsUpdater {
 	return &FakeXdsUpdater{
+		EDSErr:    make(chan error, 100),
 		Events:    make(chan string, 100),
 		Endpoints: make(chan []*model.IstioEndpoint, 100),
 	}
@@ -720,12 +725,10 @@ func (f *FakeXdsUpdater) ConfigUpdate(*model.PushRequest) {
 	f.Events <- "ConfigUpdate"
 }
 
-func (f *FakeXdsUpdater) EDSUpdate(_, _, _ string, entry []*model.IstioEndpoint) {
+func (f *FakeXdsUpdater) EDSUpdate(_, _, _ string, entry []*model.IstioEndpoint) error {
 	f.Events <- "EDSUpdate"
 	f.Endpoints <- entry
-}
-
-func (f *FakeXdsUpdater) EDSCacheUpdate(_, _, _ string, _ []*model.IstioEndpoint) {
+	return <-f.EDSErr
 }
 
 func (f *FakeXdsUpdater) SvcUpdate(_, _, _ string, _ model.Event) {
@@ -735,7 +738,7 @@ func (f *FakeXdsUpdater) ProxyUpdate(_, _ string) {
 }
 
 func TestApplyIncrementalChangeRemove(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	fx := NewFakeXDS()
 	testControllerOptions.XDSUpdater = fx
@@ -808,7 +811,7 @@ func TestApplyIncrementalChangeRemove(t *testing.T) {
 }
 
 func TestApplyIncrementalChange(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	fx := NewFakeXDS()
 	testControllerOptions.XDSUpdater = fx

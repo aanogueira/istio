@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 
 	"istio.io/istio/pkg/security"
+
 	"istio.io/istio/security/pkg/nodeagent/cache"
 	"istio.io/istio/security/pkg/nodeagent/util"
 )

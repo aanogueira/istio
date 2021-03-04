@@ -20,7 +20,6 @@ import (
 	_ "github.com/gogo/protobuf/types"
 	. "github.com/onsi/gomega"
 
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/resource"
 )
@@ -42,7 +41,7 @@ var (
 )
 
 func TestSchemas_Basic(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	s := collection.Builder{
 		Name:     "foo",
@@ -55,7 +54,7 @@ func TestSchemas_Basic(t *testing.T) {
 }
 
 func TestSchemas_MustAdd(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	defer func() {
 		r := recover()
 		g.Expect(r).To(BeNil())
@@ -70,7 +69,7 @@ func TestSchemas_MustAdd(t *testing.T) {
 }
 
 func TestSchemas_MustRegister_Panic(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	defer func() {
 		r := recover()
 		g.Expect(r).NotTo(BeNil())
@@ -86,7 +85,7 @@ func TestSchemas_MustRegister_Panic(t *testing.T) {
 }
 
 func TestSchemas_Find(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	s := collection.Builder{
 		Name:     "foo",
@@ -104,7 +103,7 @@ func TestSchemas_Find(t *testing.T) {
 }
 
 func TestSchemas_MustFind(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	defer func() {
 		r := recover()
 		g.Expect(r).To(BeNil())
@@ -125,7 +124,7 @@ func TestSchemas_MustFind(t *testing.T) {
 }
 
 func TestSchemas_MustFind_Panic(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	defer func() {
 		r := recover()
 		g.Expect(r).NotTo(BeNil())
@@ -145,7 +144,7 @@ func TestSchemas_MustFind_Panic(t *testing.T) {
 }
 
 func TestSchema_FindByGroupVersionKind(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	s := collection.Builder{
 		Name: "foo",
@@ -161,7 +160,7 @@ func TestSchema_FindByGroupVersionKind(t *testing.T) {
 
 	schemas := collection.SchemasFor(s)
 
-	s2, found := schemas.FindByGroupVersionKind(config.GroupVersionKind{
+	s2, found := schemas.FindByGroupVersionKind(resource.GroupVersionKind{
 		Group:   "mygroup",
 		Version: "v1",
 		Kind:    "Empty",
@@ -169,7 +168,7 @@ func TestSchema_FindByGroupVersionKind(t *testing.T) {
 	g.Expect(found).To(BeTrue())
 	g.Expect(s2).To(Equal(s))
 
-	_, found = schemas.FindByGroupVersionKind(config.GroupVersionKind{
+	_, found = schemas.FindByGroupVersionKind(resource.GroupVersionKind{
 		Group:   "fake",
 		Version: "v1",
 		Kind:    "Empty",
@@ -178,7 +177,7 @@ func TestSchema_FindByGroupVersionKind(t *testing.T) {
 }
 
 func TestSchema_MustFindByGroupVersionKind(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	b := collection.NewSchemasBuilder()
 
 	s := collection.Builder{
@@ -196,7 +195,7 @@ func TestSchema_MustFindByGroupVersionKind(t *testing.T) {
 	b.MustAdd(s)
 	schemas := b.Build()
 
-	got := schemas.MustFindByGroupVersionKind(config.GroupVersionKind{
+	got := schemas.MustFindByGroupVersionKind(resource.GroupVersionKind{
 		Group:   "mygroup",
 		Version: "v1",
 		Kind:    "Empty",
@@ -205,7 +204,7 @@ func TestSchema_MustFindByGroupVersionKind(t *testing.T) {
 }
 
 func TestSchema_MustFindByGroupVersionKind_Panic(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	defer func() {
 		r := recover()
@@ -213,7 +212,7 @@ func TestSchema_MustFindByGroupVersionKind_Panic(t *testing.T) {
 	}()
 
 	schemas := collection.NewSchemasBuilder().Build()
-	_ = schemas.MustFindByGroupVersionKind(config.GroupVersionKind{
+	_ = schemas.MustFindByGroupVersionKind(resource.GroupVersionKind{
 		Group:   "mygroup",
 		Version: "v1",
 		Kind:    "Empty",
@@ -221,7 +220,7 @@ func TestSchema_MustFindByGroupVersionKind_Panic(t *testing.T) {
 }
 
 func TestSchemas_CollectionNames(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	b := collection.NewSchemasBuilder()
 
 	s1 := collection.Builder{
@@ -241,7 +240,7 @@ func TestSchemas_CollectionNames(t *testing.T) {
 }
 
 func TestSchemas_Kinds(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	s := collection.SchemasFor(
 		collection.Builder{
@@ -294,7 +293,7 @@ func TestSchemas_Validate(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 			b := collection.NewSchemasBuilder()
 			for _, s := range c.schemas {
 				b.MustAdd(s)
@@ -310,7 +309,7 @@ func TestSchemas_Validate(t *testing.T) {
 }
 
 func TestSchemas_Validate_Error(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	b := collection.NewSchemasBuilder()
 
 	s1 := collection.Builder{
@@ -372,7 +371,7 @@ func TestSchemas_ForEach(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 			actual := c.actual()
 			g.Expect(actual).To(Equal(c.expected))
 		})
@@ -380,7 +379,7 @@ func TestSchemas_ForEach(t *testing.T) {
 }
 
 func TestSchemas_Remove(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	foo := collection.Builder{
 		Name:     "foo",
@@ -402,7 +401,7 @@ func TestSchemas_Remove(t *testing.T) {
 }
 
 func TestSchemas_Add(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	foo := collection.Builder{
 		Name:     "foo",

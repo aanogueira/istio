@@ -104,7 +104,7 @@ description: test
 				helmChartDirPath: "testdata/render",
 			},
 			wantResult: `apiVersion: v1
-description: test
+description: 
 name: addon
 version: 1.1.0
 appVersion: 1.1.0
@@ -127,7 +127,7 @@ keywords:
 				helmChartDirPath: "foo/bar",
 			},
 			wantResult: "",
-			wantErr:    errors.New(`component "foo-component" does not exist`),
+			wantErr:    errors.New("stat foo/bar: no such file or directory"),
 		},
 	}
 	for _, tt := range tests {

@@ -15,14 +15,9 @@
 # limitations under the License.
 
 # Update the Proxy SHA in istio.deps with the first argument
-# Exit immediately for non zero status
 set -e
-# Check unset variables
-set -u
-# Print commands
-set -x
 
-UPDATE_BRANCH=${UPDATE_BRANCH:-"release-1.8"}
+UPDATE_BRANCH=${UPDATE_BRANCH:-"release-1.7"}
 
 SCRIPTPATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOTDIR=$(dirname "${SCRIPTPATH}")

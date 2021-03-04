@@ -17,7 +17,6 @@ package istiocontrolplane
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 
@@ -45,14 +44,11 @@ import (
 	"istio.io/istio/operator/pkg/cache"
 	"istio.io/istio/operator/pkg/helm"
 	"istio.io/istio/operator/pkg/helmreconciler"
-	"istio.io/istio/operator/pkg/metrics"
 	"istio.io/istio/operator/pkg/name"
 	"istio.io/istio/operator/pkg/object"
 	"istio.io/istio/operator/pkg/tpath"
 	"istio.io/istio/operator/pkg/translate"
 	"istio.io/istio/operator/pkg/util"
-	"istio.io/istio/pkg/errdict"
-	"istio.io/istio/pkg/url"
 	"istio.io/pkg/log"
 	"istio.io/pkg/version"
 )
@@ -61,16 +57,10 @@ const (
 	finalizer = "istio-finalizer.install.istio.io"
 	// finalizerMaxRetries defines the maximum number of attempts to remove the finalizer.
 	finalizerMaxRetries = 1
-	// IgnoreReconcileAnnotation is annotation of IstioOperator CR so it would be ignored during Reconcile loop.
-	IgnoreReconcileAnnotation = "install.istio.io/ignoreReconcile"
 )
 
 var (
-	scope      = log.RegisterScope("installer", "installer", 0)
 	restConfig *rest.Config
-)
-
-var (
 	// watchedResources contains all resources we will watch and reconcile when changed
 	// Ideally this would also contain Istio CRDs, but there is a race condition here - we cannot watch
 	// a type that does not yet exist.
@@ -111,7 +101,7 @@ var (
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			obj, err := meta.Accessor(e.Object)
-			scope.Debugf("got delete event for %s.%s", obj.GetName(), obj.GetNamespace())
+			log.Debugf("got delete event for %s.%s", obj.GetName(), obj.GetNamespace())
 			if err != nil {
 				return false
 			}
@@ -150,12 +140,12 @@ var (
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldIOP, ok := e.ObjectOld.(*iopv1alpha1.IstioOperator)
 			if !ok {
-				scope.Error(errdict.OperatorFailedToGetObjectInCallback, "failed to get old IstioOperator")
+				log.Error("failed to get old IstioOperator")
 				return false
 			}
 			newIOP := e.ObjectNew.(*iopv1alpha1.IstioOperator)
 			if !ok {
-				scope.Error(errdict.OperatorFailedToGetObjectInCallback, "failed to get new IstioOperator")
+				log.Error("failed to get new IstioOperator")
 				return false
 			}
 			if !reflect.DeepEqual(oldIOP.Spec, newIOP.Spec) ||
@@ -192,9 +182,9 @@ type ReconcileIstioOperator struct {
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
 func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	scope.Info("Reconciling IstioOperator")
+	log.Info("Reconciling IstioOperator")
 
-	ns, iopName := request.Namespace, request.Name
+	ns := request.Namespace
 	reqNamespacedName := types.NamespacedName{
 		Name:      request.Name,
 		Namespace: ns,
@@ -206,46 +196,23 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 			// Request object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
-			metrics.CRDeletionTotal.Increment()
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
-		scope.Warnf(errdict.OperatorFailedToGetObjectFromAPIServer, "error getting IstioOperator %s: %s", iopName, err)
-		metrics.CountCRFetchFail(errors.ReasonForError(err))
+		log.Errorf("error getting IstioOperator iop: %s", err)
 		return reconcile.Result{}, err
 	}
 	if iop.Spec == nil {
 		iop.Spec = &v1alpha1.IstioOperatorSpec{Profile: name.DefaultProfileName}
 	}
-	operatorRevision, _ := os.LookupEnv("REVISION")
-	if operatorRevision != "" && operatorRevision != iop.Spec.Revision {
-		scope.Infof("Ignoring IstioOperator CR %s with revision %s, since operator revision is %s.", iopName, iop.Spec.Revision, operatorRevision)
-		return reconcile.Result{}, nil
-	}
-
-	if iop.Annotations != nil {
-		if ir := iop.Annotations[IgnoreReconcileAnnotation]; ir == "true" {
-			scope.Infof("Ignoring the IstioOperator CR %s because it is annotated to be ignored for reconcile ", iopName)
-			return reconcile.Result{}, nil
-		}
-	}
-
-	// for backward compatibility, the previous applied installed-state CR does not have the ignore reconcile annotation
-	// TODO(richardwxn): remove this check and rely on annotation check only
-	if strings.HasPrefix(iop.Name, name.InstalledSpecCRPrefix) {
-		scope.Infof("Ignoring the installed-state IstioOperator CR %s ", iopName)
-		return reconcile.Result{}, nil
-	}
-
 	deleted := iop.GetDeletionTimestamp() != nil
 	finalizers := sets.NewString(iop.GetFinalizers()...)
 	if deleted {
 		if !finalizers.Has(finalizer) {
-			scope.Infof("IstioOperator %s deleted", iopName)
-			metrics.CRDeletionTotal.Increment()
+			log.Info("IstioOperator deleted")
 			return reconcile.Result{}, nil
 		}
-		scope.Infof("Deleting IstioOperator %s", iopName)
+		log.Info("Deleting IstioOperator")
 
 		reconciler, err := helmreconciler.NewHelmReconciler(r.client, r.config, iop, nil)
 		if err != nil {
@@ -258,7 +225,9 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 		iop.SetFinalizers(finalizers.List())
 		finalizerError := r.client.Update(context.TODO(), iop)
 		for retryCount := 0; errors.IsConflict(finalizerError) && retryCount < finalizerMaxRetries; retryCount++ {
-			scope.Info("API server conflict during finalizer removal, retrying.")
+			// workaround for https://github.com/kubernetes/kubernetes/issues/73098 for k8s < 1.14
+			// TODO: make this error message more meaningful.
+			log.Info("conflict during finalizer removal, retrying")
 			_ = r.client.Get(context.TODO(), request.NamespacedName, iop)
 			finalizers = sets.NewString(iop.GetFinalizers()...)
 			finalizers.Delete(finalizer)
@@ -267,14 +236,13 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 		}
 		if finalizerError != nil {
 			if errors.IsNotFound(finalizerError) {
-				scope.Infof("Did not remove finalizer from %s: the object was previously deleted.", iopName)
-				metrics.CRDeletionTotal.Increment()
+				log.Infof("Could not remove finalizer from %v: the object was deleted", request)
 				return reconcile.Result{}, nil
 			} else if errors.IsConflict(finalizerError) {
-				scope.Infof("Could not remove finalizer from %s due to conflict. Operation will be retried in next reconcile attempt.", iopName)
+				log.Infof("Could not remove finalizer from %v due to conflict. Operation will be retried in next reconcile attempt", request)
 				return reconcile.Result{}, nil
 			}
-			scope.Errorf(errdict.OperatorFailedToRemoveFinalizer, "error removing finalizer: %s", finalizerError)
+			log.Errorf("error removing finalizer: %s", finalizerError)
 			return reconcile.Result{}, finalizerError
 		}
 		return reconcile.Result{}, nil
@@ -285,26 +253,25 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 		err := r.client.Update(context.TODO(), iop)
 		if err != nil {
 			if errors.IsNotFound(err) {
-				scope.Infof("Could not add finalizer to %s: the object was deleted.", iopName)
-				metrics.CRDeletionTotal.Increment()
+				log.Infof("Could not add finalizer to %v: the object was deleted", request)
 				return reconcile.Result{}, nil
 			} else if errors.IsConflict(err) {
-				scope.Infof("Could not add finalizer to %s due to conflict. Operation will be retried in next reconcile attempt.", iopName)
+				log.Infof("Could not add finalizer to %v due to conflict. Operation will be retried in next reconcile attempt", request)
 				return reconcile.Result{}, nil
 			}
-			scope.Errorf(errdict.OperatorFailedToAddFinalizer, "Failed to add finalizer to IstioOperator CR %s: %s", iopName, err)
+			log.Errorf("Failed to update IstioOperator with finalizer, %v", err)
 			return reconcile.Result{}, err
 		}
 	}
 
-	scope.Info("Updating IstioOperator")
+	log.Info("Updating IstioOperator")
 	var err error
 	iopMerged := &iopv1alpha1.IstioOperator{}
 	*iopMerged = *iop
 	iopMerged.Spec, err = mergeIOPSWithProfile(iopMerged)
 
 	if err != nil {
-		scope.Errorf(errdict.OperatorFailedToMergeUserIOP, "failed to merge base profile with user IstioOperator CR %s, %s", iopName, err)
+		log.Errorf("failed to generate IstioOperator spec, %v", err)
 		return reconcile.Result{}, err
 	}
 
@@ -312,16 +279,15 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 		iopMerged.Spec.Values["global"] = make(map[string]interface{})
 	}
 	globalValues := iopMerged.Spec.Values["global"].(map[string]interface{})
-	scope.Info("Detecting third-party JWT support")
+	log.Info("Detecting third-party JWT support")
 	var jwtPolicy util.JWTPolicy
 	if jwtPolicy, err = util.DetectSupportedJWTPolicy(r.config); err != nil {
-		// TODO(howardjohn): add to dictionary. When resolved, replace this sentence with Done or WontFix - if WontFix, add reason.
-		scope.Warnf("Failed to detect third-party JWT support: %v", err)
+		log.Warnf("Failed to detect third-party JWT support: %v", err)
 	} else {
 		if jwtPolicy == util.FirstPartyJWT {
-			scope.Info("Detected that your cluster does not support third party JWT authentication. " +
-				"Falling back to less secure first party JWT. " +
-				"See " + url.ConfigureSAToken + " for details.")
+			// nolint: lll
+			log.Info("Detected that your cluster does not support third party JWT authentication. " +
+				"Falling back to less secure first party JWT. See https://istio.io/docs/ops/best-practices/security/#configure-third-party-service-account-tokens for details.")
 		}
 		globalValues["jwtPolicy"] = string(jwtPolicy)
 	}
@@ -334,7 +300,7 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 	}
 	status, err := reconciler.Reconcile()
 	if err != nil {
-		scope.Errorf("Error during reconcile: %s", err)
+		log.Errorf("reconciling err: %s", err)
 	}
 	if err := reconciler.SetStatusComplete(status); err != nil {
 		return reconcile.Result{}, err
@@ -348,7 +314,6 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 func mergeIOPSWithProfile(iop *iopv1alpha1.IstioOperator) (*v1alpha1.IstioOperatorSpec, error) {
 	profileYAML, err := helm.GetProfileYAML(iop.Spec.InstallPackagePath, iop.Spec.Profile)
 	if err != nil {
-		metrics.CountCRMergeFail(metrics.CannotFetchProfileError)
 		return nil, err
 	}
 
@@ -359,43 +324,36 @@ func mergeIOPSWithProfile(iop *iopv1alpha1.IstioOperator) (*v1alpha1.IstioOperat
 	if hub != "" && hub != "unknown" && tag != "" && tag != "unknown" {
 		buildHubTagOverlayYAML, err := helm.GenerateHubTagOverlay(hub, tag)
 		if err != nil {
-			metrics.CountCRMergeFail(metrics.OverlayError)
 			return nil, err
 		}
 		profileYAML, err = util.OverlayYAML(profileYAML, buildHubTagOverlayYAML)
 		if err != nil {
-			metrics.CountCRMergeFail(metrics.OverlayError)
 			return nil, err
 		}
 	}
 
 	overlayYAML, err := util.MarshalWithJSONPB(iop)
 	if err != nil {
-		metrics.CountCRMergeFail(metrics.IOPFormatError)
 		return nil, err
 	}
 	t := translate.NewReverseTranslator()
 	overlayYAML, err = t.TranslateK8SfromValueToIOP(overlayYAML)
 	if err != nil {
-		metrics.CountCRMergeFail(metrics.TranslateValuesError)
 		return nil, fmt.Errorf("could not overlay k8s settings from values to IOP: %s", err)
 	}
 
 	mergedYAML, err := util.OverlayIOP(profileYAML, overlayYAML)
 	if err != nil {
-		metrics.CountCRMergeFail(metrics.OverlayError)
 		return nil, err
 	}
 
 	mergedYAML, err = translate.OverlayValuesEnablement(mergedYAML, overlayYAML, "")
 	if err != nil {
-		metrics.CountCRMergeFail(metrics.TranslateValuesError)
 		return nil, err
 	}
 
 	mergedYAMLSpec, err := tpath.GetSpecSubtree(mergedYAML)
 	if err != nil {
-		metrics.CountCRMergeFail(metrics.InternalYAMLParseError)
 		return nil, err
 	}
 
@@ -411,7 +369,7 @@ func Add(mgr manager.Manager) error {
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
-	scope.Info("Adding controller for IstioOperator.")
+	log.Info("Adding controller for IstioOperator")
 	// Create a new controller
 	c, err := controller.New("istiocontrolplane-controller", mgr, controller.Options{Reconciler: r})
 	if err != nil {
@@ -428,7 +386,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
-	scope.Info("Controller added")
+	log.Info("Controller added")
 	return nil
 }
 
@@ -443,7 +401,7 @@ func watchIstioResources(c controller.Controller) error {
 		})
 		err := c.Watch(&source.Kind{Type: u}, &handler.EnqueueRequestsFromMapFunc{
 			ToRequests: handler.ToRequestsFunc(func(a handler.MapObject) []reconcile.Request {
-				scope.Infof("Watching a change for istio resource: %s/%s", a.Meta.GetNamespace(), a.Meta.GetName())
+				log.Infof("watch a change for istio resource: %s.%s", a.Meta.GetName(), a.Meta.GetNamespace())
 				return []reconcile.Request{
 					{NamespacedName: types.NamespacedName{
 						Name:      a.Meta.GetLabels()[helmreconciler.OwningResourceName],
@@ -453,7 +411,7 @@ func watchIstioResources(c controller.Controller) error {
 			}),
 		}, ownedResourcePredicates)
 		if err != nil {
-			scope.Errorf("Could not create watch for %s/%s/%s: %s.", t.Kind, t.Group, t.Version, err)
+			log.Warnf("can not create watch for resources %s.%s.%s due to %q", t.Kind, t.Group, t.Version, err)
 		}
 	}
 	return nil

@@ -80,11 +80,10 @@ func getHTTPFilterConfig(filter *hcm_filter.HttpFilter, out proto.Message) error
 	return nil
 }
 
-func parse(listeners []*listener.Listener) []*parsedListener {
-	var parsedListeners []*parsedListener
-	for _, l := range listeners {
-		parsed := &parsedListener{}
-		for _, fc := range l.FilterChains {
+func parse(listeners []*listener.Listener) *parsedListener {
+	parsed := &parsedListener{}
+	for _, listener := range listeners {
+		for _, fc := range listener.FilterChains {
 			parsedFC := &filterChain{}
 			for _, filter := range fc.Filters {
 				switch filter.Name {
@@ -114,9 +113,9 @@ func parse(listeners []*listener.Listener) []*parsedListener {
 
 			parsed.filterChains = append(parsed.filterChains, parsedFC)
 		}
-		parsedListeners = append(parsedListeners, parsed)
 	}
-	return parsedListeners
+
+	return parsed
 }
 
 func extractName(name string) (string, string) {
@@ -131,8 +130,8 @@ func extractName(name string) (string, string) {
 
 // Print prints the AuthorizationPolicy in the listener.
 func Print(writer io.Writer, listeners []*listener.Listener) {
-	parsedListeners := parse(listeners)
-	if parsedListeners == nil {
+	parsed := parse(listeners)
+	if parsed == nil {
 		return
 	}
 
@@ -150,34 +149,32 @@ func Print(writer io.Writer, listeners []*listener.Listener) {
 		policyToRule[name][rule] = struct{}{}
 	}
 
-	for _, parsed := range parsedListeners {
-		for _, fc := range parsed.filterChains {
-			for _, rbacHTTP := range fc.rbacHTTP {
-				action := rbacHTTP.GetRules().GetAction()
-				for name := range rbacHTTP.GetRules().GetPolicies() {
-					nameOfPolicy, indexOfRule := extractName(name)
-					addPolicy(action, nameOfPolicy, indexOfRule)
-				}
-				if len(rbacHTTP.GetRules().GetPolicies()) == 0 {
-					addPolicy(action, anonymousName, "0")
-				}
+	for _, fc := range parsed.filterChains {
+		for _, rbacHTTP := range fc.rbacHTTP {
+			action := rbacHTTP.GetRules().GetAction()
+			for name := range rbacHTTP.GetRules().GetPolicies() {
+				nameOfPolicy, indexOfRule := extractName(name)
+				addPolicy(action, nameOfPolicy, indexOfRule)
 			}
-			for _, rbacTCP := range fc.rbacTCP {
-				action := rbacTCP.GetRules().GetAction()
-				for name := range rbacTCP.GetRules().GetPolicies() {
-					nameOfPolicy, indexOfRule := extractName(name)
-					addPolicy(action, nameOfPolicy, indexOfRule)
-				}
-				if len(rbacTCP.GetRules().GetPolicies()) == 0 {
-					addPolicy(action, anonymousName, "0")
-				}
+			if len(rbacHTTP.GetRules().GetPolicies()) == 0 {
+				addPolicy(action, anonymousName, "0")
+			}
+		}
+		for _, rbacTCP := range fc.rbacTCP {
+			action := rbacTCP.GetRules().GetAction()
+			for name := range rbacTCP.GetRules().GetPolicies() {
+				nameOfPolicy, indexOfRule := extractName(name)
+				addPolicy(action, nameOfPolicy, indexOfRule)
+			}
+			if len(rbacTCP.GetRules().GetPolicies()) == 0 {
+				addPolicy(action, anonymousName, "0")
 			}
 		}
 	}
 
 	buf := strings.Builder{}
 	buf.WriteString("ACTION\tAuthorizationPolicy\tRULES\n")
-	for _, action := range []rbacpb.RBAC_Action{rbacpb.RBAC_DENY, rbacpb.RBAC_ALLOW, rbacpb.RBAC_LOG} {
+	for _, action := range []rbacpb.RBAC_Action{rbacpb.RBAC_DENY, rbacpb.RBAC_ALLOW} {
 		if names, ok := actionToPolicy[action]; ok {
 			for name := range names {
 				buf.WriteString(fmt.Sprintf("%s\t%s\t%d\n", action, name, len(policyToRule[name])))

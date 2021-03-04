@@ -15,6 +15,7 @@
 package echoboot
 
 import (
+	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/kube"
 	"istio.io/istio/pkg/test/framework/resource"
@@ -23,4 +24,10 @@ import (
 // NewBuilder for Echo Instances.
 func NewBuilder(ctx resource.Context) echo.Builder {
 	return kube.NewBuilder(ctx)
+}
+
+// NewBuilder for Echo Instances.
+func NewBuilderOrFail(t test.Failer, ctx resource.Context) echo.Builder {
+	t.Helper()
+	return NewBuilder(ctx)
 }

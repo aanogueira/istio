@@ -106,8 +106,6 @@ func (p Plugin) ExchangeToken(ctx context.Context, credFetcher security.CredFetc
 	body, _ := ioutil.ReadAll(resp.Body)
 	respData := &federatedTokenResponse{}
 	if err := json.Unmarshal(body, respData); err != nil {
-		// Normally the request should json - extremely hard to debug otherwise, not enough info in status/err
-		stsClientLog.Debugf("Unexpected unmarshal error, response was %s", string(body))
 		return "", time.Now(), resp.StatusCode, fmt.Errorf(
 			"failed to unmarshal response data. HTTP status: %s. Error: %v. Body size: %d", resp.Status, err, len(body))
 	}
@@ -131,7 +129,6 @@ func constructAudience(credFetcher security.CredFetcher, trustDomain string) str
 		if GKEClusterURL != "" {
 			provider = GKEClusterURL
 		} else if platform.IsGCP() {
-			stsClientLog.Warn("GKE_CLUSTER_URL is not set, fallback to call metadata server to get identity provider")
 			provider = platform.NewGCP().Metadata()[platform.GCPClusterURL]
 		}
 	}

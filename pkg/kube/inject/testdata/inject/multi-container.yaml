@@ -13,12 +13,15 @@ spec:
         app: app
     spec:
       containers:
-      - image: image
+      - args: []
+        image: image
         name: name1
-      - image: alpine
+      - args: []
+        image: alpine
         name: name2
         ports:
         - containerPort: 123
           name: foo
-      - name: name3
+      - args: []
+        name: name3
         image: alpine

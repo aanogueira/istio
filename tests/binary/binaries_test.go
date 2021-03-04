@@ -39,9 +39,6 @@ func TestMain(m *testing.M) {
 }
 
 func TestVersion(t *testing.T) {
-	if *releasedir == "" {
-		t.Skip("release dir not set")
-	}
 	binariesToTest := strings.Split(*binaries, " ")
 	if len(binariesToTest) == 0 {
 		t.Fatal("No binaries to test. Pass the --binaries flag.")
@@ -90,9 +87,6 @@ var (
 
 // Test that flags do not get polluted with unexpected flags
 func TestFlags(t *testing.T) {
-	if *releasedir == "" {
-		t.Skip("release dir not set")
-	}
 	binariesToTest := strings.Split(*binaries, " ")
 	if len(binariesToTest) == 0 {
 		t.Fatal("No binaries to test. Pass the --binaries flag.")

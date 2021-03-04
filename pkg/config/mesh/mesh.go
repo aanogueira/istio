@@ -22,16 +22,24 @@ import (
 
 	"github.com/ghodss/yaml"
 	"github.com/gogo/protobuf/proto"
+
+	"istio.io/api/networking/v1alpha3"
+
 	"github.com/gogo/protobuf/types"
 	"github.com/hashicorp/go-multierror"
 
+	"istio.io/pkg/filewatcher"
+	"istio.io/pkg/log"
+
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/validation"
 	"istio.io/istio/pkg/util/gogoprotomarshal"
-	"istio.io/pkg/filewatcher"
-	"istio.io/pkg/log"
+)
+
+const (
+	DefaultSdsUdsPath = "unix:./etc/istio/proxy/SDS"
 )
 
 // DefaultProxyConfig for individual proxies
@@ -81,12 +89,17 @@ func DefaultMeshConfig() meshconfig.MeshConfig {
 		AccessLogEncoding:           meshconfig.MeshConfig_TEXT,
 		AccessLogFormat:             "",
 		EnableEnvoyAccessLogService: false,
-		ProtocolDetectionTimeout:    types.DurationProto(0),
+		ReportBatchMaxEntries:       100,
+		ReportBatchMaxTime:          types.DurationProto(1 * time.Second),
+		DisableMixerHttpReports:     true,
+		DisablePolicyChecks:         true,
+		ProtocolDetectionTimeout:    types.DurationProto(5 * time.Second),
 		IngressService:              "istio-ingressgateway",
 		IngressControllerMode:       meshconfig.MeshConfig_STRICT,
 		IngressClass:                "istio",
 		TrustDomain:                 "cluster.local",
 		TrustDomainAliases:          []string{},
+		SdsUdsPath:                  DefaultSdsUdsPath,
 		EnableAutoMtls:              &types.BoolValue{Value: true},
 		OutboundTrafficPolicy:       &meshconfig.MeshConfig_OutboundTrafficPolicy{Mode: meshconfig.MeshConfig_OutboundTrafficPolicy_ALLOW_ANY},
 		LocalityLbSetting: &v1alpha3.LocalityLoadBalancerSetting{
@@ -95,15 +108,21 @@ func DefaultMeshConfig() meshconfig.MeshConfig {
 		Certificates:  []*meshconfig.Certificate{},
 		DefaultConfig: &proxyConfig,
 
-		RootNamespace:                  constants.IstioSystemNamespace,
-		ProxyListenPort:                15001,
-		ConnectTimeout:                 types.DurationProto(10 * time.Second),
-		DefaultServiceExportTo:         []string{"*"},
-		DefaultVirtualServiceExportTo:  []string{"*"},
-		DefaultDestinationRuleExportTo: []string{"*"},
-		DnsRefreshRate:                 types.DurationProto(5 * time.Second), // 5 seconds is the default refresh rate used in Envoy
-		ThriftConfig:                   &meshconfig.MeshConfig_ThriftConfig{},
-		ServiceSettings:                make([]*meshconfig.MeshConfig_ServiceSettings, 0),
+		// Not set in the default mesh config - code defaults.
+		MixerCheckServer:                  "",
+		MixerReportServer:                 "",
+		PolicyCheckFailOpen:               false,
+		SidecarToTelemetrySessionAffinity: false,
+		RootNamespace:                     constants.IstioSystemNamespace,
+		ProxyListenPort:                   15001,
+		ConnectTimeout:                    types.DurationProto(10 * time.Second),
+		EnableSdsTokenMount:               false,
+		DefaultServiceExportTo:            []string{"*"},
+		DefaultVirtualServiceExportTo:     []string{"*"},
+		DefaultDestinationRuleExportTo:    []string{"*"},
+		DnsRefreshRate:                    types.DurationProto(5 * time.Second), // 5 seconds is the default refresh rate used in Envoy
+		ThriftConfig:                      &meshconfig.MeshConfig_ThriftConfig{},
+		ServiceSettings:                   make([]*meshconfig.MeshConfig_ServiceSettings, 0),
 	}
 }
 
@@ -172,18 +191,6 @@ func ApplyMeshConfig(yaml string, defaultConfig meshconfig.MeshConfig) (*meshcon
 // input YAML with defaults applied to omitted configuration values.
 func ApplyMeshConfigDefaults(yaml string) (*meshconfig.MeshConfig, error) {
 	return ApplyMeshConfig(yaml, DefaultMeshConfig())
-}
-
-func DeepCopyMeshConfig(mc *meshconfig.MeshConfig) (*meshconfig.MeshConfig, error) {
-	j, err := gogoprotomarshal.ToJSON(mc)
-	if err != nil {
-		return nil, err
-	}
-	nmc := &meshconfig.MeshConfig{}
-	if err := gogoprotomarshal.ApplyJSON(j, nmc); err != nil {
-		return nil, err
-	}
-	return nmc, nil
 }
 
 // EmptyMeshNetworks configuration with no networks

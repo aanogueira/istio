@@ -4,6 +4,8 @@ spec:
   components:
     pilot:
       enabled: false
+    policy:
+      enabled: false
     ingressGateways:
     - namespace: istio-system
       name: istio-ingressgateway
@@ -17,3 +19,5 @@ spec:
           sysctls:
           - name: "net.ipv4.ip_local_port_range"
             value: "80 65535"
+    telemetry:
+      enabled: false

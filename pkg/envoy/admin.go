@@ -39,9 +39,9 @@ func Shutdown(adminPort uint32) error {
 func DrainListeners(adminPort uint32, inboundonly bool) error {
 	var drainURL string
 	if inboundonly {
-		drainURL = "drain_listeners?inboundonly&graceful"
+		drainURL = "drain_listeners?inboundonly"
 	} else {
-		drainURL = "drain_listeners?graceful"
+		drainURL = "drain_listeners"
 	}
 	res, err := doEnvoyPost(drainURL, "", "", adminPort)
 	log.Debugf("Drain listener endpoint response : %s", res.String())

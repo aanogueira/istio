@@ -18,8 +18,6 @@ metadata:
   labels:
     app: stackdriver
 spec:
-  # Setting to NodePort, so that it's accessible from all clusters.
-  type: NodePort
   ports:
   - name: grpc
     port: 8090
@@ -43,7 +41,7 @@ spec:
         app: stackdriver
     spec:
       containers:
-      - image: gcr.io/istio-testing/fake-stackdriver:5.0
+      - image: gcr.io/istio-testing/fake-stackdriver:4.0
         imagePullPolicy: Always
         name: stackdriver
         ports:

@@ -1,4 +1,3 @@
-// +build integ
 //  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,26 +17,21 @@ package cni
 import (
 	"testing"
 
-	"istio.io/istio/tests/integration/security/util"
-
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
+	"istio.io/istio/pkg/test/framework/components/environment/kube"
 	"istio.io/istio/pkg/test/framework/components/istio"
-	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/components/namespace"
+	"istio.io/istio/pkg/test/framework/components/pilot"
 	kube2 "istio.io/istio/pkg/test/kube"
 	"istio.io/istio/tests/integration/security/util/reachability"
-)
-
-var (
-	ist  istio.Instance
-	apps = &util.EchoDeployments{}
 )
 
 func TestMain(m *testing.M) {
 	framework.
 		NewSuite(m).
 		RequireSingleCluster().
-		Setup(istio.Setup(&ist, func(_ resource.Context, cfg *istio.Config) {
+		Setup(istio.Setup(nil, func(cfg *istio.Config) {
 			cfg.ControlPlaneValues = `
 components:
   cni:
@@ -45,9 +39,6 @@ components:
      namespace: kube-system
 `
 		})).
-		Setup(func(ctx resource.Context) error {
-			return util.SetupApps(ctx, ist, apps, false)
-		}).
 		Run()
 }
 
@@ -60,38 +51,41 @@ components:
 func TestCNIReachability(t *testing.T) {
 	framework.NewTest(t).
 		Run(func(ctx framework.TestContext) {
-			cluster := ctx.Clusters().Default()
+			kenv := ctx.Environment().(*kube.Environment)
+			cluster := kenv.KubeClusters[0]
 			_, err := kube2.WaitUntilPodsAreReady(kube2.NewSinglePodFetch(cluster, "kube-system", "k8s-app=istio-cni-node"))
 			if err != nil {
 				ctx.Fatal(err)
 			}
-			systemNM := istio.ClaimSystemNamespaceOrFail(ctx, ctx)
+			rctx := reachability.CreateContext(ctx, pilot.NewOrFail(t, ctx, pilot.Config{}), false)
+			systemNM := namespace.ClaimSystemNamespaceOrFail(ctx, ctx)
+
 			testCases := []reachability.TestCase{
 				{
 					ConfigFile: "global-mtls-on.yaml",
 					Namespace:  systemNM,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Exclude headless naked service, because it is no sidecar
-						if apps.HeadlessNaked.Contains(src) || apps.HeadlessNaked.Contains(opts.Target) {
+						if src == rctx.HeadlessNaked || opts.Target == rctx.HeadlessNaked {
 							return false
 						}
 						// Exclude calls to the headless TCP port.
-						if apps.Headless.Contains(opts.Target) && opts.PortName == "tcp" {
+						if opts.Target == rctx.Headless && opts.PortName == "tcp" {
 							return false
 						}
 						return true
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
-						if apps.Naked.Contains(src) && apps.Naked.Contains(opts.Target) {
+						if src == rctx.Naked && opts.Target == rctx.Naked {
 							// naked->naked should always succeed.
 							return true
 						}
 
 						// If one of the two endpoints is naked, expect failure.
-						return !apps.Naked.Contains(src) && !apps.Naked.Contains(opts.Target)
+						return src != rctx.Naked && opts.Target != rctx.Naked
 					},
 				},
 			}
-			reachability.Run(testCases, ctx, apps)
+			rctx.Run(testCases)
 		})
 }

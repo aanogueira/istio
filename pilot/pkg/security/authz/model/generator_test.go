@@ -93,16 +93,7 @@ func TestGenerator(t *testing.T) {
 			g:     srcIPGenerator{},
 			value: "1.2.3.4",
 			want: yamlPrincipal(t, `
-         directRemoteIp:
-          addressPrefix: 1.2.3.4
-          prefixLen: 32`),
-		},
-		{
-			name:  "remoteIPGenerator",
-			g:     remoteIPGenerator{},
-			value: "1.2.3.4",
-			want: yamlPrincipal(t, `
-         remoteIp:
+         sourceIp:
           addressPrefix: 1.2.3.4
           prefixLen: 32`),
 		},
@@ -221,24 +212,6 @@ func TestGenerator(t *testing.T) {
           path:
           - key: request.auth.claims
           - key: bar
-          value:
-            listMatch:
-              oneOf:
-                stringMatch:
-                  exact: foo`),
-		},
-		{
-			name:  "requestNestedClaimsGenerator",
-			g:     requestClaimGenerator{},
-			key:   "request.auth.claims[bar][baz]",
-			value: "foo",
-			want: yamlPrincipal(t, `
-         metadata:
-          filter: istio_authn
-          path:
-          - key: request.auth.claims
-          - key: bar
-          - key: baz
           value:
             listMatch:
               oneOf:

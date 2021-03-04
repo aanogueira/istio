@@ -21,8 +21,9 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pkg/util/gogoprotomarshal"
+
+	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/pkg/filewatcher"
 	"istio.io/pkg/log"
 )

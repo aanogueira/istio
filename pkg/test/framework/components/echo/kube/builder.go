@@ -17,17 +17,16 @@ package kube
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/hashicorp/go-multierror"
 
-	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/kube"
-	"istio.io/istio/pkg/test/scopes"
 	"istio.io/istio/pkg/test/util/retry"
+
+	kubeCore "k8s.io/api/core/v1"
 )
 
 var _ echo.Builder = &builder{}
@@ -50,34 +49,32 @@ func (b *builder) With(i *echo.Instance, cfg echo.Config) echo.Builder {
 	return b
 }
 
-func (b *builder) Build() (echo.Instances, error) {
-	t0 := time.Now()
+func (b *builder) Build() error {
 	instances, err := b.newInstances()
 	if err != nil {
-		return nil, fmt.Errorf("build instance: %v", err)
+		return fmt.Errorf("build instance: %v", err)
 	}
 
 	if err := b.initializeInstances(instances); err != nil {
-		return nil, fmt.Errorf("initialize instances: %v", err)
+		return fmt.Errorf("initialize instances: %v", err)
 	}
-	scopes.Framework.Debugf("initialized echo deployments in %v", time.Since(t0))
+
+	if err := b.waitUntilAllCallable(instances); err != nil {
+		return fmt.Errorf("wait until callable: %v", err)
+	}
 
 	// Success... update the caller's references.
 	for i, inst := range instances {
-		if b.references[i] != nil {
-			*b.references[i] = inst
-		}
+		*b.references[i] = inst
 	}
-	return instances, nil
+	return nil
 }
 
-func (b *builder) BuildOrFail(t test.Failer) echo.Instances {
+func (b *builder) BuildOrFail(t test.Failer) {
 	t.Helper()
-	res, err := b.Build()
-	if err != nil {
+	if err := b.Build(); err != nil {
 		t.Fatal(err)
 	}
-	return res
 }
 
 func (b *builder) newInstances() ([]echo.Instance, error) {
@@ -95,11 +92,13 @@ func (b *builder) newInstances() ([]echo.Instance, error) {
 func (b *builder) initializeInstances(instances []echo.Instance) error {
 	// Wait to receive the k8s Endpoints for each Echo Instance.
 	wg := sync.WaitGroup{}
+	instancePods := make([][]kubeCore.Pod, len(instances))
 	aggregateErrMux := &sync.Mutex{}
 	var aggregateErr error
-	for _, inst := range instances {
+	for i, inst := range instances {
 		wg.Add(1)
 
+		instanceIndex := i
 		inst := inst
 		serviceName := inst.Config().Service
 		serviceNamespace := inst.Config().Namespace.Name()
@@ -111,7 +110,7 @@ func (b *builder) initializeInstances(instances []echo.Instance) error {
 			defer wg.Done()
 			selector := "app"
 			if inst.Config().DeployAsVM {
-				selector = constants.TestVMLabel
+				selector = "istio.io/test-vm"
 			}
 			// Wait until all the pods are ready for this service
 			fetch := kube.NewPodMustFetch(cluster, serviceNamespace, fmt.Sprintf("%s=%s", selector, serviceName))
@@ -122,11 +121,7 @@ func (b *builder) initializeInstances(instances []echo.Instance) error {
 				aggregateErrMux.Unlock()
 				return
 			}
-			if err := inst.(*instance).initialize(pods); err != nil {
-				aggregateErrMux.Lock()
-				aggregateErr = multierror.Append(aggregateErr, fmt.Errorf("initialize %v/%v/%v: %v", inst.ID(), inst.Config().Service, inst.Address(), err))
-				aggregateErrMux.Unlock()
-			}
+			instancePods[instanceIndex] = pods
 		}()
 	}
 
@@ -136,5 +131,35 @@ func (b *builder) initializeInstances(instances []echo.Instance) error {
 		return aggregateErr
 	}
 
+	// Initialize the workloads for each instance.
+	for i, inst := range instances {
+		if err := inst.(*instance).initialize(instancePods[i]); err != nil {
+			return fmt.Errorf("initialize %v: %v", inst.ID(), err)
+		}
+	}
 	return nil
+}
+
+func (b *builder) waitUntilAllCallable(instances []echo.Instance) error {
+	// Now wait for each endpoint to be callable from all others.
+	wg := sync.WaitGroup{}
+	aggregateErrMux := &sync.Mutex{}
+	var aggregateErr error
+	for _, inst := range instances {
+		wg.Add(1)
+
+		source := inst
+		go func() {
+			defer wg.Done()
+
+			if err := source.WaitUntilCallable(instances...); err != nil {
+				aggregateErrMux.Lock()
+				aggregateErr = multierror.Append(aggregateErr, err)
+				aggregateErrMux.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	return aggregateErr
 }

@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"istio.io/istio/pkg/security"
+
 	nodeagentutil "istio.io/istio/security/pkg/nodeagent/util"
 )
 
@@ -293,13 +294,14 @@ type expectedSecret struct {
 // find secret by name, and delete secret by name.
 func TestSecretFetcher(t *testing.T) {
 	gSecretFetcher := &SecretFetcher{
+		UseCaClient: false,
 		DeleteCache: func(secretName string) {},
 		UpdateCache: func(secretName string, ns security.SecretItem) {},
 		// Set fallback secret name but no such secret is created.
 		FallbackSecretName: "gateway-fallback",
 	}
 	gSecretFetcher.InitWithKubeClient(fake.NewSimpleClientset().CoreV1())
-	if gSecretFetcher.CaClient != nil {
+	if gSecretFetcher.UseCaClient {
 		t.Error("secretFetcher should not use ca client")
 	}
 	ch := make(chan struct{})
@@ -460,11 +462,12 @@ func TestSecretFetcher(t *testing.T) {
 // will skip adding or updating with the invalid secret.
 func TestSecretFetcherInvalidSecret(t *testing.T) {
 	gSecretFetcher := &SecretFetcher{
+		UseCaClient: false,
 		DeleteCache: func(secretName string) {},
 		UpdateCache: func(secretName string, ns security.SecretItem) {},
 	}
 	gSecretFetcher.InitWithKubeClient(fake.NewSimpleClientset().CoreV1())
-	if gSecretFetcher.CaClient != nil {
+	if gSecretFetcher.UseCaClient {
 		t.Error("secretFetcher should not use ca client")
 	}
 	ch := make(chan struct{})
@@ -523,11 +526,12 @@ func TestSecretFetcherInvalidSecret(t *testing.T) {
 // is not a gateway secret.
 func TestSecretFetcherSkipSecret(t *testing.T) {
 	gSecretFetcher := &SecretFetcher{
+		UseCaClient: false,
 		DeleteCache: func(secretName string) {},
 		UpdateCache: func(secretName string, ns security.SecretItem) {},
 	}
 	gSecretFetcher.InitWithKubeClient(fake.NewSimpleClientset().CoreV1())
-	if gSecretFetcher.CaClient != nil {
+	if gSecretFetcher.UseCaClient {
 		t.Error("secretFetcher should not use ca client")
 	}
 	ch := make(chan struct{})
@@ -630,11 +634,12 @@ func TestSecretFetcherSkipSecret(t *testing.T) {
 // from TLS secret format.
 func TestSecretFetcherTlsSecretFormat(t *testing.T) {
 	gSecretFetcher := &SecretFetcher{
+		UseCaClient: false,
 		DeleteCache: func(secretName string) {},
 		UpdateCache: func(secretName string, ns security.SecretItem) {},
 	}
 	gSecretFetcher.InitWithKubeClient(fake.NewSimpleClientset().CoreV1())
-	if gSecretFetcher.CaClient != nil {
+	if gSecretFetcher.UseCaClient {
 		t.Error("secretFetcher should not use ca client")
 	}
 	ch := make(chan struct{})
@@ -709,12 +714,13 @@ func TestSecretFetcherTlsSecretFormat(t *testing.T) {
 // the fall back secret will be returned when real secret is not added, or is already deleted.
 func TestSecretFetcherUsingFallbackIngressSecret(t *testing.T) {
 	gSecretFetcher := &SecretFetcher{
+		UseCaClient:        false,
 		DeleteCache:        func(secretName string) {},
 		UpdateCache:        func(secretName string, ns security.SecretItem) {},
 		FallbackSecretName: k8sSecretFallbackScrt,
 	}
 	gSecretFetcher.InitWithKubeClient(fake.NewSimpleClientset().CoreV1())
-	if gSecretFetcher.CaClient != nil {
+	if gSecretFetcher.UseCaClient {
 		t.Error("secretFetcher should not use ca client")
 	}
 	ch := make(chan struct{})

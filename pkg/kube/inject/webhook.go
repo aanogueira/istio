@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,33 +29,27 @@ import (
 	"time"
 
 	"github.com/ghodss/yaml"
+	"github.com/howeyc/fsnotify"
 	kubeApiAdmissionv1 "k8s.io/api/admission/v1"
 	kubeApiAdmissionv1beta1 "k8s.io/api/admission/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	kjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 
 	"istio.io/api/annotation"
 	"istio.io/api/label"
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pilot/cmd/pilot-agent/status"
-	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/kube"
 	"istio.io/pkg/log"
 )
 
 var (
-	runtimeScheme     = runtime.NewScheme()
-	codecs            = serializer.NewCodecFactory(runtimeScheme)
-	deserializer      = codecs.UniversalDeserializer()
-	jsonSerializer    = kjson.NewSerializerWithOptions(kjson.DefaultMetaFactory, runtimeScheme, runtimeScheme, kjson.SerializerOptions{})
-	URLParameterToEnv = map[string]string{
-		"cluster": "ISTIO_META_CLUSTER_ID",
-		"net":     "ISTIO_META_NETWORK",
-	}
+	runtimeScheme = runtime.NewScheme()
+	codecs        = serializer.NewCodecFactory(runtimeScheme)
+	deserializer  = codecs.UniversalDeserializer()
 )
 
 func init() {
@@ -78,7 +73,10 @@ type Webhook struct {
 	healthCheckInterval time.Duration
 	healthCheckFile     string
 
-	watcher Watcher
+	configFile string
+	valuesFile string
+
+	watcher *fsnotify.Watcher
 
 	mon      *monitor
 	env      *model.Environment
@@ -91,8 +89,8 @@ func loadConfig(injectFile, valuesFile string) (*Config, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	var c *Config
-	if c, err = unmarshalConfig(data); err != nil {
+	var c Config
+	if err := yaml.Unmarshal(data, &c); err != nil {
 		log.Warnf("Failed to parse injectFile %s", string(data))
 		return nil, "", err
 	}
@@ -101,28 +99,23 @@ func loadConfig(injectFile, valuesFile string) (*Config, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	return c, string(valuesConfig), nil
-}
-
-func unmarshalConfig(data []byte) (*Config, error) {
-	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		return nil, err
-	}
 
 	log.Debugf("New inject configuration: sha256sum %x", sha256.Sum256(data))
 	log.Debugf("Policy: %v", c.Policy)
 	log.Debugf("AlwaysInjectSelector: %v", c.AlwaysInjectSelector)
 	log.Debugf("NeverInjectSelector: %v", c.NeverInjectSelector)
 	log.Debugf("Template: |\n  %v", strings.Replace(c.Template, "\n", "\n  ", -1))
-	return &c, nil
+
+	return &c, string(valuesConfig), nil
 }
 
 // WebhookParameters configures parameters for the sidecar injection
 // webhook.
 type WebhookParameters struct {
-	// Watcher watches the sidecar injection configuration.
-	Watcher Watcher
+	// ConfigFile is the path to the sidecar injection configuration file.
+	ConfigFile string
+
+	ValuesFile string
 
 	// Port is the webhook port, e.g. typically 443 for https.
 	// This is mainly used for tests. Webhook runs on the port started by Istiod.
@@ -155,23 +148,36 @@ func NewWebhook(p WebhookParameters) (*Webhook, error) {
 	if p.Mux == nil {
 		return nil, errors.New("expected mux to be passed, but was not passed")
 	}
-
-	wh := &Webhook{
-		watcher:             p.Watcher,
-		meshConfig:          p.Env.Mesh(),
-		healthCheckInterval: p.HealthCheckInterval,
-		healthCheckFile:     p.HealthCheckFile,
-		env:                 p.Env,
-		revision:            p.Revision,
-	}
-
-	p.Watcher.SetHandler(wh.updateConfig)
-	sidecarConfig, valuesConfig, err := p.Watcher.Get()
+	sidecarConfig, valuesConfig, err := loadConfig(p.ConfigFile, p.ValuesFile)
 	if err != nil {
 		return nil, err
 	}
-	wh.updateConfig(sidecarConfig, valuesConfig)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	// watch the parent directory of the target files so we can catch
+	// symlink updates of k8s ConfigMaps volumes.
+	for _, file := range []string{p.ConfigFile} {
+		watchDir, _ := filepath.Split(file)
+		if err := watcher.Watch(watchDir); err != nil {
+			return nil, fmt.Errorf("could not watch %v: %v", file, err)
+		}
+	}
 
+	wh := &Webhook{
+		Config:                 sidecarConfig,
+		sidecarTemplateVersion: sidecarTemplateVersionHash(sidecarConfig.Template),
+		meshConfig:             p.Env.Mesh(),
+		configFile:             p.ConfigFile,
+		valuesFile:             p.ValuesFile,
+		valuesConfig:           valuesConfig,
+		watcher:                watcher,
+		healthCheckInterval:    p.HealthCheckInterval,
+		healthCheckFile:        p.HealthCheckFile,
+		env:                    p.Env,
+		revision:               p.Revision,
+	}
 	p.Mux.HandleFunc("/inject", wh.serveInject)
 	p.Mux.HandleFunc("/inject/", wh.serveInject)
 
@@ -194,7 +200,7 @@ func NewWebhook(p WebhookParameters) (*Webhook, error) {
 
 // Run implements the webhook server
 func (wh *Webhook) Run(stop <-chan struct{}) {
-	go wh.watcher.Run(stop)
+	defer wh.watcher.Close()
 
 	if wh.mon != nil {
 		defer wh.mon.monitoringServer.Close()
@@ -206,9 +212,36 @@ func (wh *Webhook) Run(stop <-chan struct{}) {
 		healthC = t.C
 		defer t.Stop()
 	}
+	var timerC <-chan time.Time
 
 	for {
 		select {
+		case <-timerC:
+			timerC = nil
+			sidecarConfig, valuesConfig, err := loadConfig(wh.configFile, wh.valuesFile)
+			if err != nil {
+				log.Errorf("update error: %v", err)
+				break
+			}
+
+			version := sidecarTemplateVersionHash(sidecarConfig.Template)
+			if err != nil {
+				log.Errorf("reload cert error: %v", err)
+				break
+			}
+			wh.mu.Lock()
+			wh.Config = sidecarConfig
+			wh.valuesConfig = valuesConfig
+			wh.sidecarTemplateVersion = version
+			wh.mu.Unlock()
+		case event := <-wh.watcher.Event:
+			log.Debugf("Injector watch update: %+v", event)
+			// use a timer to debounce configuration updates
+			if (event.IsModify() || event.IsCreate()) && timerC == nil {
+				timerC = time.After(watchDebounceDelay)
+			}
+		case err := <-wh.watcher.Error:
+			log.Errorf("Watcher error: %v", err)
 		case <-healthC:
 			content := []byte(`ok`)
 			if err := ioutil.WriteFile(wh.healthCheckFile, content, 0644); err != nil {
@@ -218,15 +251,6 @@ func (wh *Webhook) Run(stop <-chan struct{}) {
 			return
 		}
 	}
-}
-
-func (wh *Webhook) updateConfig(sidecarConfig *Config, valuesConfig string) {
-	version := sidecarTemplateVersionHash(sidecarConfig.Template)
-	wh.mu.Lock()
-	wh.Config = sidecarConfig
-	wh.valuesConfig = valuesConfig
-	wh.sidecarTemplateVersion = version
-	wh.mu.Unlock()
 }
 
 // It would be great to use https://github.com/mattbaird/jsonpatch to
@@ -535,33 +559,14 @@ func createPatch(pod *corev1.Pod, prevStatus *SidecarInjectionStatus, revision s
 
 	patch = append(patch, updateAnnotation(pod.Annotations, annotations)...)
 
-	canonicalSvc, canonicalRev := ExtractCanonicalServiceLabels(pod.Labels, workloadName)
-	patchLabels := map[string]string{
+	canonicalSvc, canonicalRev := extractCanonicalServiceLabels(pod.Labels, workloadName)
+	patch = append(patch, addLabels(pod.Labels, map[string]string{
 		label.TLSMode:                                model.IstioMutualTLSModeLabel,
 		model.IstioCanonicalServiceLabelName:         canonicalSvc,
 		label.IstioRev:                               revision,
-		model.IstioCanonicalServiceRevisionLabelName: canonicalRev,
-	}
-	if network := topologyValues(sic); network != "" {
-		// only added if if not already set
-		patchLabels[label.IstioNetwork] = network
-	}
-	patch = append(patch, addLabels(pod.Labels, patchLabels)...)
+		model.IstioCanonicalServiceRevisionLabelName: canonicalRev})...)
 
 	return json.Marshal(patch)
-}
-
-// topologyValues will find the value of ISTIO_META_NETWORK in the spec or return a zero-value
-func topologyValues(sic *SidecarInjectionSpec) string {
-	// TODO should we just return the values used to populate the template from InjectionData?
-	for _, c := range sic.Containers {
-		for _, e := range c.Env {
-			if e.Name == "ISTIO_META_NETWORK" {
-				return e.Value
-			}
-		}
-	}
-	return ""
 }
 
 func enablePrometheusMerge(mesh *meshconfig.MeshConfig, anno map[string]string) bool {
@@ -583,7 +588,7 @@ func enablePrometheusMerge(mesh *meshconfig.MeshConfig, anno map[string]string) 
 	return true
 }
 
-func ExtractCanonicalServiceLabels(podLabels map[string]string, workloadName string) (string, string) {
+func extractCanonicalServiceLabels(podLabels map[string]string, workloadName string) (string, string) {
 	return extractCanonicalServiceLabel(podLabels, workloadName), extractCanonicalServiceRevision(podLabels)
 }
 
@@ -662,57 +667,6 @@ func toAdmissionResponse(err error) *kube.AdmissionResponse {
 	return &kube.AdmissionResponse{Result: &metav1.Status{Message: err.Error()}}
 }
 
-type InjectionParameters struct {
-	pod                 *corev1.Pod
-	deployMeta          *metav1.ObjectMeta
-	typeMeta            *metav1.TypeMeta
-	template            string
-	version             string
-	meshConfig          *meshconfig.MeshConfig
-	valuesConfig        string
-	revision            string
-	proxyEnvs           map[string]string
-	injectedAnnotations map[string]string
-}
-
-func injectPod(req InjectionParameters) ([]byte, error) {
-	pod := req.pod
-
-	if features.EnableLegacyFSGroupInjection {
-		// due to bug https://github.com/kubernetes/kubernetes/issues/57923,
-		// k8s sa jwt token volume mount file is only accessible to root user, not istio-proxy(the user that istio proxy runs as).
-		// workaround by https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod
-		var grp = int64(1337)
-		if pod.Spec.SecurityContext == nil {
-			pod.Spec.SecurityContext = &corev1.PodSecurityContext{
-				FSGroup: &grp,
-			}
-		} else {
-			pod.Spec.SecurityContext.FSGroup = &grp
-		}
-	}
-
-	spec, iStatus, err := InjectionData(req, req.typeMeta, req.deployMeta)
-	if err != nil {
-		return nil, err
-	}
-
-	annotations := map[string]string{annotation.SidecarStatus.Name: iStatus}
-
-	// Add all additional injected annotations
-	for k, v := range req.injectedAnnotations {
-		annotations[k] = v
-	}
-
-	patchBytes, err := createPatch(pod, injectionStatus(pod), req.revision, annotations, spec, req.deployMeta.Name, req.meshConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	log.Debugf("AdmissionResponse: patch=%v\n", string(patchBytes))
-	return patchBytes, nil
-}
-
 func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.AdmissionResponse {
 	req := ar.Request
 	var pod corev1.Pod
@@ -727,7 +681,9 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
 	if pod.ObjectMeta.Namespace == "" {
 		pod.ObjectMeta.Namespace = req.Namespace
 	}
-	log.Infof("Sidecar injection request for %v/%v", req.Namespace, podName)
+
+	log.Infof("AdmissionReview for Kind=%v Namespace=%v Name=%v (%v) UID=%v Rfc6902PatchOperation=%v UserInfo=%v",
+		req.Kind, req.Namespace, req.Name, podName, req.UID, req.Operation, req.UserInfo)
 	log.Debugf("Object: %v", string(req.Object.Raw))
 	log.Debugf("OldObject: %v", string(req.OldObject.Raw))
 
@@ -739,25 +695,90 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
 		}
 	}
 
-	deploy, typeMeta := kube.GetDeployMetaFromPod(&pod)
-	params := InjectionParameters{
-		pod:                 &pod,
-		deployMeta:          deploy,
-		typeMeta:            typeMeta,
-		template:            wh.Config.Template,
-		version:             wh.sidecarTemplateVersion,
-		meshConfig:          wh.meshConfig,
-		valuesConfig:        wh.valuesConfig,
-		revision:            wh.revision,
-		injectedAnnotations: wh.Config.InjectedAnnotations,
-		proxyEnvs:           parseInjectEnvs(path),
+	// due to bug https://github.com/kubernetes/kubernetes/issues/57923,
+	// k8s sa jwt token volume mount file is only accessible to root user, not istio-proxy(the user that istio proxy runs as).
+	// workaround by https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod
+	if wh.meshConfig.SdsUdsPath != "" {
+		var grp = int64(1337)
+		if pod.Spec.SecurityContext == nil {
+			pod.Spec.SecurityContext = &corev1.PodSecurityContext{
+				FSGroup: &grp,
+			}
+		} else {
+			pod.Spec.SecurityContext.FSGroup = &grp
+		}
 	}
 
-	patchBytes, err := injectPod(params)
+	// try to capture more useful namespace/name info for deployments, etc.
+	// TODO(dougreid): expand to enable lookup of OWNERs recursively a la kubernetesenv
+	deployMeta := pod.ObjectMeta.DeepCopy()
+	deployMeta.Namespace = req.Namespace
+
+	typeMetadata := &metav1.TypeMeta{
+		Kind:       "Pod",
+		APIVersion: "v1",
+	}
+
+	if len(pod.GenerateName) > 0 {
+		// if the pod name was generated (or is scheduled for generation), we can begin an investigation into the controlling reference for the pod.
+		var controllerRef metav1.OwnerReference
+		controllerFound := false
+		for _, ref := range pod.GetOwnerReferences() {
+			if *ref.Controller {
+				controllerRef = ref
+				controllerFound = true
+				break
+			}
+		}
+		if controllerFound {
+			typeMetadata.APIVersion = controllerRef.APIVersion
+			typeMetadata.Kind = controllerRef.Kind
+
+			// heuristic for deployment detection
+			deployMeta.Name = controllerRef.Name
+			if typeMetadata.Kind == "ReplicaSet" && strings.HasSuffix(controllerRef.Name, pod.Labels["pod-template-hash"]) {
+				name := strings.TrimSuffix(controllerRef.Name, "-"+pod.Labels["pod-template-hash"])
+				deployMeta.Name = name
+				typeMetadata.Kind = "Deployment"
+			} else if typeMetadata.Kind == "Job" && len(controllerRef.Name) > 11 {
+				// If job name suffixed with `-<ten-digit-timestamp>`, trim the suffix and set kind to cron job.
+				l := len(controllerRef.Name)
+				if _, err := strconv.Atoi(controllerRef.Name[l-10:]); err == nil && string(controllerRef.Name[l-11]) == "-" {
+					deployMeta.Name = controllerRef.Name[:l-11]
+					typeMetadata.Kind = "CronJob"
+					// heuristically set cron job api version to v1beta1 as it cannot be derived from pod metadata.
+					// Cronjob is not GA yet and latest version is v1beta1: https://github.com/kubernetes/enhancements/pull/978
+					typeMetadata.APIVersion = "batch/v1beta1"
+				}
+			}
+		}
+	}
+
+	if deployMeta.Name == "" {
+		// if we haven't been able to extract a deployment name, then just give it the pod name
+		deployMeta.Name = pod.Name
+	}
+
+	spec, iStatus, err := InjectionData(wh.Config.Template, wh.valuesConfig, wh.sidecarTemplateVersion, typeMetadata, deployMeta, &pod.Spec, &pod.ObjectMeta, wh.meshConfig, path) // nolint: lll
 	if err != nil {
-		handleError(fmt.Sprintf("Pod injection failed: %v", err))
+		handleError(fmt.Sprintf("Injection data: err=%v spec=%v\n", err, iStatus))
 		return toAdmissionResponse(err)
 	}
+
+	annotations := map[string]string{annotation.SidecarStatus.Name: iStatus}
+
+	// Add all additional injected annotations
+	for k, v := range wh.Config.InjectedAnnotations {
+		annotations[k] = v
+	}
+
+	patchBytes, err := createPatch(&pod, injectionStatus(&pod), wh.revision, annotations, spec, deployMeta.Name, wh.meshConfig)
+	if err != nil {
+		handleError(fmt.Sprintf("AdmissionResponse: err=%v spec=%v\n", err, spec))
+		return toAdmissionResponse(err)
+	}
+
+	log.Debugf("AdmissionResponse: patch=%v\n", string(patchBytes))
 
 	reviewResponse := kube.AdmissionResponse{
 		Allowed: true,
@@ -836,33 +857,6 @@ func (wh *Webhook) serveInject(w http.ResponseWriter, r *http.Request) {
 		log.Errorf("Could not write response: %v", err)
 		http.Error(w, fmt.Sprintf("could not write response: %v", err), http.StatusInternalServerError)
 	}
-}
-
-// parseInjectEnvs parse new envs from inject url path
-// follow format: /inject/k1/v1/k2/v2, any kv order works
-// eg. "/inject/cluster/cluster1", "/inject/net/network1/cluster/cluster1"
-func parseInjectEnvs(path string) map[string]string {
-	path = strings.TrimSuffix(path, "/")
-	res := strings.Split(path, "/")
-	newEnvs := make(map[string]string)
-
-	for i := 2; i < len(res); i += 2 { // skip '/inject'
-		k := res[i]
-		if i == len(res)-1 { // ignore the last key without value
-			log.Warnf("Odd number of inject env entries, ignore the last key %s\n", k)
-			break
-		}
-
-		env, found := URLParameterToEnv[k]
-		if !found {
-			env = strings.ToUpper(k) // if not found, use the custom env directly
-		}
-		if env != "" {
-			newEnvs[env] = res[i+1]
-		}
-	}
-
-	return newEnvs
 }
 
 func handleError(message string) {

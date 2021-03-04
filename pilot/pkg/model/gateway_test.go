@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pkg/config"
 )
 
 func TestMergeGateways(t *testing.T) {
@@ -32,56 +31,56 @@ func TestMergeGateways(t *testing.T) {
 
 	tests := []struct {
 		name               string
-		gwConfig           []config.Config
+		gwConfig           []Config
 		serversNum         int
 		serversForRouteNum map[string]int
 		gatewaysNum        int
 	}{
 		{
 			"single-server-config",
-			[]config.Config{gwHTTPFoo},
+			[]Config{gwHTTPFoo},
 			1,
 			map[string]int{"http.7": 1},
 			1,
 		},
 		{
 			"same-server-config",
-			[]config.Config{gwHTTPFoo, gwHTTPWildcardAlternate},
+			[]Config{gwHTTPFoo, gwHTTPWildcardAlternate},
 			1,
 			map[string]int{"http.7": 2},
 			2,
 		},
 		{
 			"multi-server-config",
-			[]config.Config{gwHTTPFoo, gwHTTPWildcardAlternate, gwHTTPWildcard},
+			[]Config{gwHTTPFoo, gwHTTPWildcardAlternate, gwHTTPWildcard},
 			2,
 			map[string]int{"http.7": 2, "http.8": 1},
 			3,
 		},
 		{
 			"http-tcp-server-config",
-			[]config.Config{gwHTTPFoo, gwTCPWildcard},
+			[]Config{gwHTTPFoo, gwTCPWildcard},
 			2,
 			map[string]int{"http.7": 1},
 			2,
 		},
 		{
 			"tcp-tcp-server-config",
-			[]config.Config{gwTCPWildcard, gwHTTPWildcard},
+			[]Config{gwTCPWildcard, gwHTTPWildcard},
 			1,
 			map[string]int{},
 			2,
 		},
 		{
 			"tcp-tcp-server-config",
-			[]config.Config{gwHTTPWildcard, gwTCPWildcard}, //order matters
+			[]Config{gwHTTPWildcard, gwTCPWildcard}, //order matters
 			1,
 			map[string]int{"http.8": 1},
 			2,
 		},
 		{
 			"http-http2-server-config",
-			[]config.Config{gwHTTPWildcard, gwHTTP2Wildcard}, //order matters
+			[]Config{gwHTTPWildcard, gwHTTP2Wildcard}, //order matters
 			1,
 			// http and http2 both present
 			map[string]int{"http.8": 2},
@@ -110,9 +109,9 @@ func TestMergeGateways(t *testing.T) {
 	}
 }
 
-func makeConfig(name, namespace, host, portName, portProtocol string, portNumber uint32, gw string) config.Config {
-	c := config.Config{
-		Meta: config.Meta{
+func makeConfig(name, namespace, host, portName, portProtocol string, portNumber uint32, gw string) Config {
+	c := Config{
+		ConfigMeta: ConfigMeta{
 			Name:      name,
 			Namespace: namespace,
 		},

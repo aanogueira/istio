@@ -16,6 +16,7 @@ package rt
 
 import (
 	"github.com/gogo/protobuf/proto"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"istio.io/istio/pkg/config/resource"
@@ -24,7 +25,7 @@ import (
 )
 
 // ToResource converts the given object and proto to a resource.Instance
-func ToResource(object metav1.Object, schema collection.Schema, item proto.Message, source resource.Reference, fieldMap map[string]int) *resource.Instance {
+func ToResource(object metav1.Object, schema collection.Schema, item proto.Message, source resource.Reference) *resource.Instance {
 	var o *Origin
 
 	name := resource.NewFullName(resource.Namespace(object.GetNamespace()), resource.LocalName(object.GetName()))
@@ -39,7 +40,6 @@ func ToResource(object metav1.Object, schema collection.Schema, item proto.Messa
 			Kind:       schema.Resource().Kind(),
 			Version:    version,
 			Ref:        source,
-			FieldsMap:  fieldMap,
 		}
 	}
 

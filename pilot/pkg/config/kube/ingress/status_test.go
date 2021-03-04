@@ -24,6 +24,7 @@ import (
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	meshapi "istio.io/api/mesh/v1alpha1"
+
 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
 	"istio.io/istio/pkg/config/mesh"
 	kubelib "istio.io/istio/pkg/kube"
@@ -119,7 +120,7 @@ func setupFake(t *testing.T, client kubelib.Client) {
 	}
 }
 
-func makeStatusSyncer(t *testing.T) *StatusSyncer {
+func makeStatusSyncer(t *testing.T) (*StatusSyncer, error) {
 	m := mesh.DefaultMeshConfig()
 	m.IngressService = "istio-ingress"
 
@@ -129,13 +130,16 @@ func makeStatusSyncer(t *testing.T) *StatusSyncer {
 
 	client := kubelib.NewFakeClient()
 	setupFake(t, client)
-	sync := NewStatusSyncer(&m, client)
+	sync, err := NewStatusSyncer(&m, client)
+	if err != nil {
+		return nil, err
+	}
 	stop := make(chan struct{})
 	client.RunAndWait(stop)
 	t.Cleanup(func() {
 		close(stop)
 	})
-	return sync
+	return sync, nil
 }
 
 // setAndRestoreEnv set the envs with given value, and return the old setting.
@@ -208,7 +212,11 @@ func TestRunningAddresses(t *testing.T) {
 }
 
 func testRunningAddressesWithService(t *testing.T) {
-	syncer := makeStatusSyncer(t)
+	syncer, err := makeStatusSyncer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	address, err := syncer.runningAddresses(testNamespace)
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +228,11 @@ func testRunningAddressesWithService(t *testing.T) {
 }
 
 func testRunningAddressesWithHostname(t *testing.T) {
-	syncer := makeStatusSyncer(t)
+	syncer, err := makeStatusSyncer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	syncer.ingressService = "istio-ingress-hostname"
 
 	address, err := syncer.runningAddresses(testNamespace)
@@ -235,7 +247,11 @@ func testRunningAddressesWithHostname(t *testing.T) {
 
 func TestRunningAddressesWithPod(t *testing.T) {
 	ingressNamespace = "istio-system" // it is set in real pilot on newController.
-	syncer := makeStatusSyncer(t)
+	syncer, err := makeStatusSyncer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	syncer.ingressService = ""
 
 	address, err := syncer.runningAddresses(ingressNamespace)

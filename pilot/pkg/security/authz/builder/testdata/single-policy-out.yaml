@@ -138,15 +138,10 @@ typedConfig:
                           regex: .*/ns/rule[0]-from[0]-ns[2]/.*
             - orIds:
                 ids:
-                - remoteIp:
-                    addressPrefix: 172.16.10.10
-                    prefixLen: 32
-            - orIds:
-                ids:
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 10.0.0.1
                     prefixLen: 32
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 10.0.0.2
                     prefixLen: 32
             - orIds:
@@ -163,14 +158,6 @@ typedConfig:
                 - header:
                     name: X-header
                     presentMatch: true
-            - orIds:
-                ids:
-                - remoteIp:
-                    addressPrefix: 10.99.10.8
-                    prefixLen: 32
-                - remoteIp:
-                    addressPrefix: 10.80.64.0
-                    prefixLen: 18
         - andIds:
             ids:
             - orIds:
@@ -227,18 +214,10 @@ typedConfig:
                           regex: .*/ns/rule[0]-from[1]-ns[2]/.*
             - orIds:
                 ids:
-                - remoteIp:
-                    addressPrefix: 172.17.8.0
-                    prefixLen: 24
-                - remoteIp:
-                    addressPrefix: 172.17.9.4
-                    prefixLen: 32
-            - orIds:
-                ids:
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 10.0.1.1
                     prefixLen: 32
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 192.0.1.2
                     prefixLen: 32
             - orIds:
@@ -255,14 +234,6 @@ typedConfig:
                 - header:
                     name: X-header
                     presentMatch: true
-            - orIds:
-                ids:
-                - remoteIp:
-                    addressPrefix: 10.99.10.8
-                    prefixLen: 32
-                - remoteIp:
-                    addressPrefix: 10.80.64.0
-                    prefixLen: 18
       ns[foo]-policy[httpbin]-rule[1]:
         permissions:
         - andRules:
@@ -382,18 +353,10 @@ typedConfig:
                           regex: .*/ns/rule[1]-from[0]-ns[2]/.*
             - orIds:
                 ids:
-                - remoteIp:
-                    addressPrefix: 172.22.2.0
-                    prefixLen: 23
-                - remoteIp:
-                    addressPrefix: 172.21.234.254
-                    prefixLen: 32
-            - orIds:
-                ids:
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 10.1.0.1
                     prefixLen: 32
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 10.1.0.2
                     prefixLen: 32
         - andIds:
@@ -452,17 +415,9 @@ typedConfig:
                           regex: .*/ns/rule[1]-from[1]-ns[2]/.*
             - orIds:
                 ids:
-                - remoteIp:
-                    addressPrefix: 192.168.4.0
-                    prefixLen: 24
-                - remoteIp:
-                    addressPrefix: 192.168.7.8
-                    prefixLen: 32
-            - orIds:
-                ids:
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 10.1.1.1
                     prefixLen: 32
-                - directRemoteIp:
+                - sourceIp:
                     addressPrefix: 192.1.1.2
                     prefixLen: 32

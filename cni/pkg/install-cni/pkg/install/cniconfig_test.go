@@ -26,8 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"istio.io/istio/cni/pkg/install-cni/pkg/config"
+	"istio.io/istio/cni/pkg/install-cni/pkg/util"
 	testutils "istio.io/istio/pilot/test/util"
-	"istio.io/istio/pkg/file"
 )
 
 func TestGetDefaultCNINetwork(t *testing.T) {
@@ -58,19 +58,6 @@ func TestGetDefaultCNINetwork(t *testing.T) {
 			name:            "empty directory",
 			dir:             tempDir,
 			expectedFailure: true,
-		},
-		{
-			// Only .conf and .conflist files are detectable
-			name:            "undetectable file",
-			dir:             tempDir,
-			expectedFailure: true,
-			inFilename:      "undetectable.file",
-			fileContents: `
-{
-	"cniVersion": "0.3.1",
-	"name": "istio-cni",
-	"type": "istio-cni"
-}`,
 		},
 		{
 			name:            "empty file",
@@ -213,11 +200,7 @@ func TestGetCNIConfigFilepath(t *testing.T) {
 			}()
 
 			// Create existing config files if specified in test case
-			for _, filename := range c.existingConfFiles {
-				if err := file.AtomicCopy(filepath.Join("testdata", filepath.Base(filename)), tempDir, filepath.Base(filename)); err != nil {
-					t.Fatal(err)
-				}
-			}
+			util.CopyExistingConfFiles(t, tempDir, c.existingConfFiles...)
 
 			cfg := pluginConfig{
 				mountedCNINetDir: tempDir,
@@ -232,7 +215,7 @@ func TestGetCNIConfigFilepath(t *testing.T) {
 			if !c.chainedCNIPlugin {
 				// Standalone CNI plugin
 				parent := context.Background()
-				ctx1, cancel := context.WithTimeout(parent, 100*time.Millisecond)
+				ctx1, cancel := context.WithTimeout(parent, 5*time.Second)
 				defer cancel()
 				result, err := getCNIConfigFilepath(ctx1, cfg)
 				if err != nil {
@@ -253,7 +236,7 @@ func TestGetCNIConfigFilepath(t *testing.T) {
 			// Call with goroutine to test fsnotify watcher
 			parent, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			resultChan, errChan := make(chan string, 1), make(chan error, 1)
+			resultChan, errChan := make(chan string), make(chan error)
 			go func(resultChan chan string, errChan chan error, ctx context.Context, cfg pluginConfig) {
 				result, err := getCNIConfigFilepath(ctx, cfg)
 				if err != nil {
@@ -279,7 +262,7 @@ func TestGetCNIConfigFilepath(t *testing.T) {
 				return
 			case err := <-errChan:
 				t.Fatal(err)
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(5 * time.Second):
 				if len(c.delayedConfName) > 0 {
 					// Delayed case
 					// Write delayed CNI config file
@@ -311,7 +294,7 @@ func TestGetCNIConfigFilepath(t *testing.T) {
 				}
 			case err := <-errChan:
 				t.Fatal(err)
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(5 * time.Second):
 				t.Fatalf("timed out waiting for expected %s", expectedFilepath)
 			}
 		})
@@ -363,7 +346,7 @@ func TestInsertCNIConfig(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			istioConf := testutils.ReadFile(filepath.Join("testdata", c.newConfFilename), t)
-			existingConfFilepath := filepath.Join("testdata", c.existingConfFilename)
+			existingConfFilepath := "testdata/" + c.existingConfFilename
 			existingConf := testutils.ReadFile(existingConfFilepath, t)
 
 			output, err := insertCNIConfig(istioConf, existingConf)
@@ -406,14 +389,14 @@ func TestCreateCNIConfigFile(t *testing.T) {
 		specifiedConfName string
 		expectedConfName  string
 		goldenConfName    string
-		existingConfFiles map[string]string // {srcFilename: targetFilename, ...}
+		existingConfFiles []string
 	}{
 		{
 			name:              "unspecified existing CNI config file (existing .conf to conflist)",
 			chainedCNIPlugin:  true,
 			expectedConfName:  "bridge.conflist",
 			goldenConfName:    "bridge.conf.golden",
-			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist": "list.conflist"},
+			existingConfFiles: []string{"bridge.conf", "list.conflist"},
 		},
 		{
 			name:             "unspecified CNI config file never created",
@@ -425,7 +408,7 @@ func TestCreateCNIConfigFile(t *testing.T) {
 			specifiedConfName: "list.conflist",
 			expectedConfName:  "list.conflist",
 			goldenConfName:    "list.conflist.golden",
-			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist": "list.conflist"},
+			existingConfFiles: []string{"bridge.conf", "list.conflist"},
 		},
 		{
 			name:              "specified existing CNI config file (specified .conf to .conflist)",
@@ -433,7 +416,7 @@ func TestCreateCNIConfigFile(t *testing.T) {
 			specifiedConfName: "list.conf",
 			expectedConfName:  "list.conflist",
 			goldenConfName:    "list.conflist.golden",
-			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist": "list.conflist"},
+			existingConfFiles: []string{"bridge.conf", "list.conflist"},
 		},
 		{
 			name:              "specified existing CNI config file (existing .conf to .conflist)",
@@ -441,21 +424,13 @@ func TestCreateCNIConfigFile(t *testing.T) {
 			specifiedConfName: "bridge.conflist",
 			expectedConfName:  "bridge.conflist",
 			goldenConfName:    "bridge.conf.golden",
-			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist": "list.conflist"},
+			existingConfFiles: []string{"bridge.conf", "list.conflist"},
 		},
 		{
 			name:              "specified CNI config file never created",
 			chainedCNIPlugin:  true,
 			specifiedConfName: "never-created.conf",
-			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist": "list.conflist"},
-		},
-		{
-			name:              "specified CNI config file undetectable",
-			chainedCNIPlugin:  true,
-			specifiedConfName: "undetectable.file",
-			expectedConfName:  "undetectable.file",
-			goldenConfName:    "list.conflist.golden",
-			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist": "undetectable.file"},
+			existingConfFiles: []string{"bridge.conf", "list.conflist"},
 		},
 		{
 			name:             "standalone CNI plugin unspecified CNI config file",
@@ -500,11 +475,7 @@ func TestCreateCNIConfigFile(t *testing.T) {
 				}()
 
 				// Create existing config files if specified in test case
-				for srcFilename, targetFilename := range c.existingConfFiles {
-					if err := file.AtomicCopy(filepath.Join("testdata", srcFilename), tempDir, targetFilename); err != nil {
-						t.Fatal(err)
-					}
-				}
+				util.CopyExistingConfFiles(t, tempDir, c.existingConfFiles...)
 
 				cfg.MountedCNINetDir = tempDir
 
@@ -513,7 +484,7 @@ func TestCreateCNIConfigFile(t *testing.T) {
 					expectedFilepath = filepath.Join(tempDir, c.expectedConfName)
 				}
 
-				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				resultFilepath, err := createCNIConfigFile(ctx, &cfg, "")
 				if err != nil {

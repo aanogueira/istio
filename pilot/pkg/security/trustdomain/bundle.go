@@ -18,8 +18,9 @@ import (
 	"fmt"
 	"strings"
 
-	"istio.io/istio/pkg/config/constants"
 	istiolog "istio.io/pkg/log"
+
+	"istio.io/istio/pkg/config/constants"
 )
 
 var (

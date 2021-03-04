@@ -20,12 +20,11 @@ import (
 )
 
 var (
-	StatusCodeOK              = strconv.Itoa(http.StatusOK)
-	StatusUnauthorized        = strconv.Itoa(http.StatusUnauthorized)
-	StatusCodeForbidden       = strconv.Itoa(http.StatusForbidden)
-	StatusCodeUnavailable     = strconv.Itoa(http.StatusServiceUnavailable)
-	StatusCodeBadRequest      = strconv.Itoa(http.StatusBadRequest)
-	StatusCodeTooManyRequests = strconv.Itoa(http.StatusTooManyRequests)
+	StatusCodeOK          = strconv.Itoa(http.StatusOK)
+	StatusUnauthorized    = strconv.Itoa(http.StatusUnauthorized)
+	StatusCodeForbidden   = strconv.Itoa(http.StatusForbidden)
+	StatusCodeUnavailable = strconv.Itoa(http.StatusServiceUnavailable)
+	StatusCodeBadRequest  = strconv.Itoa(http.StatusBadRequest)
 )
 
 // Field is a list of fields returned in responses from the Echo server.
@@ -39,7 +38,5 @@ const (
 	URLField            Field = "URL"
 	HostField           Field = "Host"
 	HostnameField       Field = "Hostname"
-	MethodField         Field = "Method"
-	ResponseHeader      Field = "ResponseHeader"
 	ClusterField        Field = "Cluster"
 )

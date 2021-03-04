@@ -27,13 +27,14 @@ import (
 	"k8s.io/api/networking/v1beta1"
 	"k8s.io/client-go/kubernetes"
 
+	"istio.io/pkg/log"
+
 	"istio.io/istio/istioctl/pkg/clioptions"
 	"istio.io/istio/istioctl/pkg/convert"
 	"istio.io/istio/pilot/pkg/config/kube/crd"
-	"istio.io/istio/pkg/config"
+	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/validation"
-	"istio.io/pkg/log"
 )
 
 var (
@@ -58,7 +59,7 @@ func convertConfigs(readers []io.Reader, writer io.Writer, client kubernetes.Int
 		}
 	}
 
-	out := make([]config.Config, 0)
+	out := make([]model.Config, 0)
 	convertedIngresses, err := convert.IstioIngresses(ingresses, "", client)
 	if err == nil {
 		out = append(out, convertedIngresses...)
@@ -75,8 +76,8 @@ func convertConfigs(readers []io.Reader, writer io.Writer, client kubernetes.Int
 	return nil
 }
 
-func readConfigs(readers []io.Reader) ([]config.Config, []*v1beta1.Ingress, error) {
-	out := make([]config.Config, 0, len(readers))
+func readConfigs(readers []io.Reader) ([]model.Config, []*v1beta1.Ingress, error) {
+	out := make([]model.Config, 0)
 	outIngresses := make([]*v1beta1.Ingress, 0)
 
 	for _, reader := range readers {
@@ -128,7 +129,7 @@ func readConfigs(readers []io.Reader) ([]config.Config, []*v1beta1.Ingress, erro
 	return out, outIngresses, nil
 }
 
-func writeYAMLOutput(configs []config.Config, writer io.Writer) {
+func writeYAMLOutput(configs []model.Config, writer io.Writer) {
 	for i, cfg := range configs {
 		obj, err := crd.ConvertConfig(cfg)
 		if err != nil {
@@ -147,11 +148,11 @@ func writeYAMLOutput(configs []config.Config, writer io.Writer) {
 	}
 }
 
-func validateConfigs(configs []config.Config) error {
+func validateConfigs(configs []model.Config) error {
 	var errs error
 	for _, cfg := range configs {
 		if collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind() == cfg.GroupVersionKind {
-			if _, err := validation.ValidateVirtualService(cfg); err != nil {
+			if err := validation.ValidateVirtualService(cfg.Name, cfg.Namespace, cfg.Spec); err != nil {
 				errs = multierror.Append(err, errs)
 			}
 		}

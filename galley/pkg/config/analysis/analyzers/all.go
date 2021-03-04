@@ -51,7 +51,6 @@ func All() []analysis.Analyzer {
 		&virtualservice.DestinationRuleAnalyzer{},
 		&virtualservice.GatewayAnalyzer{},
 		&virtualservice.RegexAnalyzer{},
-		&virtualservice.MatchesAnalyzer{},
 		&destinationrule.CaCertificateAnalyzer{},
 	}
 

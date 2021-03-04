@@ -30,17 +30,9 @@ import (
 const (
 	// DefaultProfileFilename is the name of the default profile yaml file.
 	DefaultProfileFilename = "default.yaml"
-	ChartsSubdirName       = "charts"
-	profilesRoot           = "profiles"
 
-	// LocalBuildInfo provides instruction on how to build istio
-	// if the compiled in charts are not found
-	LocalBuildInfo = `
- compiled in charts not found in this development build,
- use manifests as local charts instead e.g:
- - istioctl install --set hub=gcr.io/istio-testing -d manifests/
- - or istioctl operator init --hub=gcr.io/istio-testing -d manifests/
- - or run make gen-charts and rebuild istioctl`
+	ChartsSubdirName = "charts"
+	profilesRoot     = "profiles"
 )
 
 // VFSRenderer is a helm template renderer that uses compiled-in helm charts.
@@ -115,11 +107,7 @@ func readProfiles(chartsDir string) (map[string]bool, error) {
 			return nil, fmt.Errorf("failed to read profiles: %v", err)
 		}
 		for _, f := range profilePaths {
-			// Ensure only .yaml files are included in the rendered output
-			trimmedString := strings.TrimSuffix(f, ".yaml")
-			if f != trimmedString {
-				profiles[trimmedString] = true
-			}
+			profiles[strings.TrimSuffix(f, ".yaml")] = true
 		}
 	default:
 		dir, err := ioutil.ReadDir(filepath.Join(chartsDir, profilesRoot))
@@ -127,10 +115,7 @@ func readProfiles(chartsDir string) (map[string]bool, error) {
 			return nil, fmt.Errorf("failed to read profiles: %v", err)
 		}
 		for _, f := range dir {
-			trimmedString := strings.TrimSuffix(f.Name(), ".yaml")
-			if f.Name() != trimmedString {
-				profiles[trimmedString] = true
-			}
+			profiles[strings.TrimSuffix(f.Name(), ".yaml")] = true
 		}
 	}
 	return profiles, nil
@@ -141,9 +126,6 @@ func (h *VFSRenderer) loadChart() error {
 	prefix := h.helmChartDirPath
 	fnames, err := vfs.GetFilesRecursive(prefix)
 	if err != nil {
-		if err.Error() == fmt.Sprintf("Asset %s not found", prefix) {
-			return missingComponentMessages(h.componentName)
-		}
 		return err
 	}
 	var bfs []*loader.BufferedFile
@@ -193,7 +175,8 @@ func ListProfiles(charts string) ([]string, error) {
 // binaries using go build instead of make and tries to use compiled in charts.
 func CheckCompiledInCharts() error {
 	if _, err := vfs.Stat(ChartsSubdirName); err != nil {
-		return fmt.Errorf(LocalBuildInfo)
+		return fmt.Errorf("compiled in charts not found in this development build, use --manifests with " +
+			"local charts instead (e.g. istioctl install --manifests manifests/) or run make gen-charts and rebuild istioctl")
 	}
 	return nil
 }

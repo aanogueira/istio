@@ -31,7 +31,6 @@ type Origin struct {
 	FullName   resource.FullName
 	Version    resource.Version
 	Ref        resource.Reference
-	FieldsMap  map[string]int
 }
 
 var _ resource.Origin = &Origin{}
@@ -61,11 +60,6 @@ func (o *Origin) Namespace() resource.Namespace {
 // Reference implements resource.Origin
 func (o *Origin) Reference() resource.Reference {
 	return o.Ref
-}
-
-// GetFieldMap implements resource.Origin
-func (o *Origin) FieldMap() map[string]int {
-	return o.FieldsMap
 }
 
 // Position is a representation of the location of a source.

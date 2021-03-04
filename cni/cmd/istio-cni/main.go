@@ -24,12 +24,14 @@ import (
 	"strconv"
 	"time"
 
+	"istio.io/api/annotation"
+
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/cni/pkg/version"
+	"go.uber.org/zap"
 
-	"istio.io/api/annotation"
 	"istio.io/pkg/log"
 )
 
@@ -133,7 +135,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 		loggedPrevResult = conf.PrevResult
 	}
 
-	log.WithLabels("version", conf.CNIVersion, "prevResult", loggedPrevResult).Info("CmdAdd config parsed")
+	log.Info("CmdAdd config parsed",
+		zap.String("version", conf.CNIVersion),
+		zap.Reflect("prevResult", loggedPrevResult))
 
 	// Determine if running under k8s by checking the CNI args
 	k8sArgs := K8sArgs{}
@@ -149,8 +153,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 		interceptRuleMgrType = conf.Kubernetes.InterceptRuleMgrType
 	}
 
-	log.WithLabels("ContainerID", args.ContainerID, "Pod", string(k8sArgs.K8S_POD_NAME),
-		"Namespace", string(k8sArgs.K8S_POD_NAMESPACE), "InterceptType", interceptRuleMgrType).Info("")
+	log.Info("",
+		zap.String("ContainerID", args.ContainerID),
+		zap.String("Pod", string(k8sArgs.K8S_POD_NAME)),
+		zap.String("Namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
+		zap.String("InterceptType", interceptRuleMgrType))
 
 	// Check if the workload is running under Kubernetes.
 	if string(k8sArgs.K8S_POD_NAMESPACE) != "" && string(k8sArgs.K8S_POD_NAME) != "" {
@@ -166,7 +173,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			if err != nil {
 				return err
 			}
-			log.Debugf("Created Kubernetes client: %v", client)
+			log.Debug("Created Kubernetes client", zap.Reflect("client", client))
 			var containers []string
 			var initContainersMap map[string]struct{}
 			var annotations map[string]string
@@ -176,32 +183,30 @@ func cmdAdd(args *skel.CmdArgs) error {
 				if k8sErr == nil {
 					break
 				}
-				log.WithLabels("err", k8sErr, "attempt", attempt).Warn("Waiting for pod metadata")
+				log.Warn("Waiting for pod metadata", zap.Error(k8sErr), zap.Int("attempt", attempt))
 				time.Sleep(podRetrievalInterval)
 			}
 			if k8sErr != nil {
-				log.WithLabels("err", k8sErr).Error("Failed to get pod data")
+				log.Error("Failed to get pod data", zap.Error(k8sErr))
 				return k8sErr
 			}
 
 			// Check if istio-init container is present; in that case exclude pod
 			if _, present := initContainersMap[ISTIOINIT]; present {
-				log.WithLabels(
-					"pod", string(k8sArgs.K8S_POD_NAME),
-					"namespace", string(k8sArgs.K8S_POD_NAMESPACE)).
-					Info("Pod excluded due to being already injected with istio-init container")
+				log.Info("Pod excluded due to being already injected with istio-init container",
+					zap.String("pod", string(k8sArgs.K8S_POD_NAME)),
+					zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)))
 				excludePod = true
 			}
 
 			log.Infof("Found containers %v", containers)
 			if len(containers) > 1 {
-				log.WithLabels(
-					"ContainerID", args.ContainerID,
-					"netns", args.Netns,
-					"pod", string(k8sArgs.K8S_POD_NAME),
-					"Namespace", string(k8sArgs.K8S_POD_NAMESPACE),
-					"annotations", annotations).
-					Info("Checking annotations prior to redirect for Istio proxy")
+				log.Info("Checking annotations prior to redirect for Istio proxy",
+					zap.String("ContainerID", args.ContainerID),
+					zap.String("netns", args.Netns),
+					zap.String("pod", string(k8sArgs.K8S_POD_NAME)),
+					zap.String("Namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
+					zap.Reflect("annotations", annotations))
 				if val, ok := annotations[injectAnnotationKey]; ok {
 					log.Infof("Pod %s contains inject annotation: %s", string(k8sArgs.K8S_POD_NAME), val)
 					if injectEnabled, err := strconv.ParseBool(val); err == nil {

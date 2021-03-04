@@ -17,19 +17,19 @@ package kube
 import (
 	"context"
 	"fmt"
-	"time"
-
-	"github.com/hashicorp/go-multierror"
-	kubeCore "k8s.io/api/core/v1"
 
 	istioKube "istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/test"
-	"istio.io/istio/pkg/test/echo/client"
 	"istio.io/istio/pkg/test/echo/common"
-	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/errors"
 	"istio.io/istio/pkg/test/framework/resource"
-	"istio.io/istio/pkg/test/util/retry"
+
+	"github.com/hashicorp/go-multierror"
+
+	"istio.io/istio/pkg/test/echo/client"
+	"istio.io/istio/pkg/test/framework/components/echo"
+
+	kubeCore "k8s.io/api/core/v1"
 )
 
 const (
@@ -52,22 +52,13 @@ type workload struct {
 
 func newWorkload(pod kubeCore.Pod, sidecared bool, grpcPort uint16, cluster resource.Cluster,
 	tls *common.TLSSettings, ctx resource.Context) (*workload, error) {
-
 	// Create a forwarder to the command port of the app.
-	var forwarder istioKube.PortForwarder
-	if err := retry.UntilSuccess(func() error {
-		fw, err := cluster.NewPortForwarder(pod.Name, pod.Namespace, "", 0, int(grpcPort))
-		if err != nil {
-			return fmt.Errorf("new port forwarder: %v", err)
-		}
-		if err = fw.Start(); err != nil {
-			fw.Close()
-			return fmt.Errorf("forwarder start: %v", err)
-		}
-		forwarder = fw
-		return nil
-	}, retry.Delay(1*time.Second), retry.Timeout(10*time.Second)); err != nil {
-		return nil, err
+	forwarder, err := cluster.NewPortForwarder(pod.Name, pod.Namespace, "", 0, int(grpcPort))
+	if err != nil {
+		return nil, fmt.Errorf("new port forwarder: %v", err)
+	}
+	if err = forwarder.Start(); err != nil {
+		return nil, fmt.Errorf("forwarder start: %v", err)
 	}
 
 	// Create a gRPC client to this workload.
@@ -115,10 +106,6 @@ func (w *workload) checkDeprecation() error {
 
 	info := fmt.Sprintf("pod: %s/%s", w.pod.Namespace, w.pod.Name)
 	return errors.FindDeprecatedMessagesInEnvoyLog(logs, info)
-}
-
-func (w *workload) PodName() string {
-	return w.pod.Name
 }
 
 func (w *workload) Address() string {

@@ -17,8 +17,6 @@ package controller
 import (
 	"reflect"
 	"testing"
-
-	"istio.io/api/label"
 )
 
 func TestGetLocalityFromTopology(t *testing.T) {
@@ -38,9 +36,9 @@ func TestGetLocalityFromTopology(t *testing.T) {
 		{
 			"all standard kubernetes labels and Istio custom labels",
 			map[string]string{
-				NodeRegionLabelGA:  "region",
-				NodeZoneLabelGA:    "zone",
-				label.IstioSubZone: "subzone",
+				NodeRegionLabelGA: "region",
+				NodeZoneLabelGA:   "zone",
+				IstioSubzoneLabel: "subzone",
 			},
 			"region/zone/subzone",
 		},

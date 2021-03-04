@@ -181,7 +181,8 @@ func verifyPostInstall(enableVerbose bool, istioNamespaceFlag string,
 			// IstioOperator isn't part of pkg/config/schema/collections,
 			// usual conversion not available.  Convert unstructured to string
 			// and ask operator code to unmarshal.
-			fixTimestampRelatedUnmarshalIssues(un)
+
+			un.SetCreationTimestamp(meta_v1.Time{}) // UnmarshalIstioOperator chokes on these
 			by := util.ToYAML(un)
 			iop, err := operator_istio.UnmarshalIstioOperator(by, true)
 			if err != nil {
@@ -251,25 +252,27 @@ func NewVerifyCommand() *cobra.Command {
 		Use:   "verify-install [-f <deployment or istio operator file>] [--revision <revision>]",
 		Short: "Verifies Istio Installation Status",
 		Long: `
-verify-install verifies Istio installation status against the installation file
-you specified when you installed Istio. It loops through all the installation
-resources defined in your installation file and reports whether all of them are
-in ready status. It will report failure when any of them are not ready.
+		verify-install verifies Istio installation status against the installation file
+		you specified when you installed Istio. It loops through all the installation
+		resources defined in your installation file and reports whether all of them are
+		in ready status. It will report failure when any of them are not ready.
 
-If you do not specify an installation it will check for an IstioOperator resource
-and will verify if pods and services defined in it are present.
+		If you do not specify an installation it will check for an IstioOperator resource
+		and will verify if pods and services defined in it are present.
 
-Note: For verifying whether your cluster is ready for Istio installation, see
-istioctl experimental precheck.
+		Note: For verifying whether your cluster is ready for Istio installation, see
+		istioctl experimental precheck.
 `,
-		Example: `  # Verify that Istio is installed correctly via Istio Operator
-  istioctl verify-install
+		Example: `
+		# Verify that Istio is installed correctly via Istio Operator
+		istioctl verify-install
 
-  # Verify the deployment matches a custom Istio deployment configuration
-  istioctl verify-install -f $HOME/istio.yaml
+		# Verify the deployment matches a custom Istio deployment configuration
+		istioctl verify-install -f $HOME/istio.yaml
 
-  # Verify the deployment matches the Istio Operator deployment definition
-  istioctl verify-install --revision <canary>`,
+		# Verify the deployment matches the Istio Operator deployment definition
+		istioctl verify-install --revision <canary>
+`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(fileNameFlags.ToOptions().Filenames) > 0 && opts.Revision != "" {
 				cmd.Println(cmd.UsageString())
@@ -420,8 +423,7 @@ func operatorFromCluster(istioNamespaceFlag string, revision string, restClientG
 		return nil, err
 	}
 	for _, un := range ul.Items {
-		fixTimestampRelatedUnmarshalIssues(&un)
-
+		un.SetCreationTimestamp(meta_v1.Time{}) // UnmarshalIstioOperator chokes on these
 		by := util.ToYAML(un.Object)
 		iop, err := operator_istio.UnmarshalIstioOperator(by, true)
 		if err != nil {
@@ -444,7 +446,7 @@ func allOperatorsInCluster(client dynamic.Interface) ([]*v1alpha1.IstioOperator,
 	}
 	retval := make([]*v1alpha1.IstioOperator, 0)
 	for _, un := range ul.Items {
-		fixTimestampRelatedUnmarshalIssues(&un)
+		un.SetCreationTimestamp(meta_v1.Time{}) // UnmarshalIstioOperator chokes on these
 		by := util.ToYAML(un.Object)
 		iop, err := operator_istio.UnmarshalIstioOperator(by, true)
 		if err != nil {
@@ -453,13 +455,4 @@ func allOperatorsInCluster(client dynamic.Interface) ([]*v1alpha1.IstioOperator,
 		retval = append(retval, iop)
 	}
 	return retval, nil
-}
-
-func fixTimestampRelatedUnmarshalIssues(un *unstructured.Unstructured) {
-	un.SetCreationTimestamp(meta_v1.Time{}) // UnmarshalIstioOperator chokes on these
-
-	// UnmarshalIstioOperator fails because managedFields could contain time
-	// and gogo/protobuf/jsonpb(v1.3.1) tries to unmarshal it as struct (the type
-	// meta_v1.Time is really a struct) and fails.
-	un.SetManagedFields([]meta_v1.ManagedFieldsEntry{})
 }

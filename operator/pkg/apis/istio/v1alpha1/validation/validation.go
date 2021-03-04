@@ -15,7 +15,6 @@
 package validation
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"istio.io/api/operator/v1alpha1"
+
 	valuesv1alpha1 "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
 	"istio.io/istio/operator/pkg/tpath"
 	"istio.io/istio/operator/pkg/util"
@@ -49,13 +49,9 @@ func ValidateConfig(failOnMissingValidation bool, iopls *v1alpha1.IstioOperatorS
 	if err := util.UnmarshalValuesWithJSONPB(iopvalString, values, true); err != nil {
 		return util.NewErrs(err), ""
 	}
-
 	validationErrors = util.AppendErrs(validationErrors, ValidateSubTypes(reflect.ValueOf(values).Elem(), failOnMissingValidation, values, iopls))
 	validationErrors = util.AppendErrs(validationErrors, validateFeatures(values, iopls))
-	deprecatedErrors, warningMessage := checkDeprecatedSettings(iopls)
-	if deprecatedErrors != nil {
-		validationErrors = util.AppendErr(validationErrors, deprecatedErrors)
-	}
+	warningMessage += deprecatedSettingsMessage(iopls)
 	return validationErrors, warningMessage
 }
 
@@ -78,10 +74,9 @@ func firstCharsToLower(s string) string {
 		s)
 }
 
-func checkDeprecatedSettings(iop *v1alpha1.IstioOperatorSpec) (util.Errors, string) {
-	var errs util.Errors
+func deprecatedSettingsMessage(iop *v1alpha1.IstioOperatorSpec) string {
 	messages := []string{}
-	warningSettings := []deprecatedSettings{
+	deprecations := []deprecatedSettings{
 		{"Values.global.certificates", "meshConfig.certificates", nil},
 		{"Values.global.trustDomainAliases", "meshConfig.trustDomainAliases", nil},
 		{"Values.global.outboundTrafficPolicy", "meshConfig.outboundTrafficPolicy", nil},
@@ -90,34 +85,15 @@ func checkDeprecatedSettings(iop *v1alpha1.IstioOperatorSpec) (util.Errors, stri
 		{"Values.global.enableTracing", "meshConfig.enableTracing", false},
 		{"Values.global.proxy.accessLogFormat", "meshConfig.accessLogFormat", ""},
 		{"Values.global.proxy.accessLogFile", "meshConfig.accessLogFile", ""},
+		{"Values.global.proxy.accessLogEncoding", "meshConfig.accessLogEncoding", valuesv1alpha1.AccessLogEncoding_JSON},
 		{"Values.global.proxy.concurrency", "meshConfig.defaultConfig.concurrency", uint32(0)},
 		{"Values.global.proxy.envoyAccessLogService", "meshConfig.defaultConfig.envoyAccessLogService", nil},
 		{"Values.global.proxy.envoyAccessLogService.enabled", "meshConfig.enableEnvoyAccessLogService", nil},
 		{"Values.global.proxy.envoyMetricsService", "meshConfig.defaultConfig.envoyMetricsService", nil},
 		{"Values.global.proxy.protocolDetectionTimeout", "meshConfig.protocolDetectionTimeout", ""},
-		{"Values.global.proxy.holdApplicationUntilProxyStarts", "ProxyConfig holdApplicationUntilProxyStarts", nil},
 		{"Values.pilot.ingress", "meshConfig.ingressService, meshConfig.ingressControllerMode, and meshConfig.ingressClass", nil},
 		{"Values.global.mtls.enabled", "the PeerAuthentication resource", nil},
 		{"Values.global.mtls.auto", "meshConfig.enableAutoMtls", nil},
-		{"Values.global.tracer.lightstep.address", "meshConfig.defaultConfig.tracing.lightstep.address", ""},
-		{"Values.global.tracer.lightstep.accessToken", "meshConfig.defaultConfig.tracing.lightstep.accessToken", ""},
-		{"Values.global.tracer.zipkin.address", "meshConfig.defaultConfig.tracing.zipkin.address", nil},
-		{"Values.global.tracer.stackdriver.debug", "meshConfig.defaultConfig.tracing.stackdriver.debug", false},
-		{"Values.global.tracer.stackdriver.maxNumberOfAttributes", "meshConfig.defaultConfig.tracing.stackdriver.maxNumberOfAttributes", 0},
-		{"Values.global.tracer.stackdriver.maxNumberOfAnnotations", "meshConfig.defaultConfig.tracing.stackdriver.maxNumberOfAnnotations", 0},
-		{"Values.global.tracer.stackdriver.maxNumberOfMessageEvents", "meshConfig.defaultConfig.tracing.stackdriver.maxNumberOfMessageEvents", 0},
-		{"Values.global.tracer.datadog.address", "meshConfig.defaultConfig.tracing.datadog.address", ""},
-		{"Values.global.meshExpansion.enabled", "Gateway and other Istio networking resources, such as in samples/istiod-gateway/", false},
-		{"Values.global.trustDomain", "meshConfig.trustDomain", false},
-		{"Values.gateways.istio-ingressgateway.meshExpansionPorts", "components.ingressGateways[name=istio-ingressgateway].k8s.service.ports", nil},
-		{"AddonComponents.istiocoredns.Enabled", "the in-proxy DNS capturing (ISTIO_META_DNS_CAPTURE)", false},
-		{"Values.istiocoredns.enabled", "the in-proxy DNS capturing (ISTIO_META_DNS_CAPTURE)", false},
-		{"Values.telemetry.v2.stackdriver.logging", "Values.telemetry.v2.stackdriver.outboundAccessLogging and Values.telemetry.v2.stackdriver.inboundAccessLogging",
-			false},
-		{"Values.global.centralIstiod", "Values.global.externallIstiod", false},
-	}
-
-	failHardSettings := []deprecatedSettings{
 		{"Values.grafana.enabled", "the samples/addons/ deployments", false},
 		{"Values.tracing.enabled", "the samples/addons/ deployments", false},
 		{"Values.kiali.enabled", "the samples/addons/ deployments", false},
@@ -127,8 +103,7 @@ func checkDeprecatedSettings(iop *v1alpha1.IstioOperatorSpec) (util.Errors, stri
 		{"AddonComponents.kiali.Enabled", "the samples/addons/ deployments", false},
 		{"AddonComponents.prometheus.Enabled", "the samples/addons/ deployments", false},
 	}
-
-	for _, d := range warningSettings {
+	for _, d := range deprecations {
 		// Grafana is a special case where its just an interface{}. A better fix would probably be defining
 		// the types, but since this is deprecated this is easier
 		v, f, _ := tpath.GetFromStructPath(iop, d.old)
@@ -143,21 +118,36 @@ func checkDeprecatedSettings(iop *v1alpha1.IstioOperatorSpec) (util.Errors, stri
 			}
 		}
 	}
-	for _, d := range failHardSettings {
+	mixerDeprecations := []deprecatedSettings{
+		{"Values.telemetry.v1.enabled", "", false},
+		{"Values.global.disablePolicyChecks", "", true},
+		{"MeshConfig.disablePolicyChecks", "", true},
+		{"Values.pilot.policy.enabled", "", false},
+		{"Components.Telemetry.Enabled", "", false},
+		{"Components.Policy.Enabled", "", false},
+	}
+	useMixerSettings := false
+	mds := []string{}
+	for _, d := range mixerDeprecations {
 		v, f, _ := tpath.GetFromStructPath(iop, d.old)
 		if f {
 			switch t := v.(type) {
-			// need to do conversion for bool value defined in IstioOperator component spec.
 			case *v1alpha1.BoolValueForPB:
 				v = t.Value
 			}
 			if v != d.def {
-				ms := fmt.Sprintf("! %s is deprecated; use %s instead", firstCharsToLower(d.old), d.new)
-				errs = util.AppendErr(errs, errors.New(ms+"\n"))
+				useMixerSettings = true
+				mds = append(mds, d.old)
 			}
 		}
 	}
-	return errs, strings.Join(messages, "\n")
+	const mixerDeprecatedMessage = "! %s is deprecated. Mixer is deprecated and will be removed" +
+		" from Istio with the 1.8 release. Please consult our docs on the replacement."
+	if useMixerSettings {
+		messages = append(messages, fmt.Sprintf(mixerDeprecatedMessage, strings.Join(mds, ", ")))
+	}
+
+	return strings.Join(messages, "\n")
 }
 
 // validateFeatures check whether the config sematically make sense. For example, feature X and feature Y can't be enabled together.

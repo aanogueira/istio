@@ -37,11 +37,13 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/crypto/ssh/terminal"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 
 	clientnetworking "istio.io/client-go/pkg/apis/networking/v1alpha3"
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+
 	"istio.io/istio/pkg/spiffe"
 	"istio.io/istio/security/pkg/k8s/secret"
 	"istio.io/istio/security/pkg/pki/util"
@@ -546,13 +548,13 @@ the "--remote-scp-path" option.
 In order to start Istio on the remote node you must have docker installed on the remote node.
 Istio will be started on the host network as a docker container in capture mode.`,
 		Example: `  # Copy certificates to a WorkloadEntry named "we" in the "ns" namespace:
-  istioctl x sidecar-bootstrap we.ns
+	istioctl x sidecar-bootstrap we.ns
 
-  # Copy certificates, and start istio to a WorkloadEntry named "we" in the "ns" namespace:
-  istioctl x sidecar-bootstrap we.ns --start-istio-proxy
+	# Copy certificates, and start istio to a WorkloadEntry named "we" in the "ns" namespace:
+	istioctl x sidecar-bootstrap we.ns --start-istio-proxy
 
-  # Generate Certs locally, but do not copy them to a WorkloadEntry named "we" in the "ns" namespace:
-  istioctl x sidecar-bootstrap we.ns --local-dir path/where/i/want/certs/`,
+	# Generate Certs locally, but do not copy them to a WorkloadEntry named "we" in the "ns" namespace:
+	istioctl x sidecar-bootstrap we.ns --local-dir path/where/i/want/certs/`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if (len(args) == 1) == all {
 				cmd.Println(cmd.UsageString())
@@ -631,35 +633,35 @@ Istio will be started on the host network as a docker container in capture mode.
 	}
 
 	vmBSCommand.PersistentFlags().BoolVarP(&all, "all", "a", false,
-		"Attempt to bootstrap all workload entries")
+		"attempt to bootstrap all workload entries")
 	vmBSCommand.PersistentFlags().DurationVar(&certDuration, "duration", 365*24*time.Hour,
-		"(experimental) Duration the certificates generated are valid for.")
+		"(experimental) duration the certificates generated are valid for.")
 	vmBSCommand.PersistentFlags().StringVarP(&dumpDir, "local-dir", "d", "",
-		"Directory to place certs in locally as opposed to copying")
+		"directory to place certs in locally as opposed to copying")
 	vmBSCommand.PersistentFlags().StringVar(&istioProxyImage, "istio-image", "istio/proxyv2:latest",
-		"(experimental) The Istio proxy image to start up when starting Istio")
+		"(experimental) the Istio proxy image to start up when starting Istio")
 	vmBSCommand.PersistentFlags().BoolVar(&mutualTLS, "mutual-tls", false,
-		"(experimental) Enable mutual TLS if starting Istio-Proxy.")
+		"(experimental) enable mutual TLS if starting Istio-Proxy.")
 	vmBSCommand.PersistentFlags().StringVarP(&organization, "organization", "o", "",
-		"(experimental) The organization to use on the certificate, defaults to the same as the root cert.")
+		"(experimental) the organization to use on the certificate, defaults to the same as the root cert.")
 	vmBSCommand.PersistentFlags().StringVar(&remoteDirectory, "remote-directory", "/var/run/istio",
-		"(experimental) The directory to create on the remote machine.")
+		"(experimental) the directory to create on the remote machine.")
 	vmBSCommand.PersistentFlags().StringVar(&scpPath, "remote-scp-path", "/usr/bin/scp",
-		"(experimental) The scp binary location on the target machine if not at /usr/bin/scp")
+		"(experimental) the scp binary location on the target machine if not at /usr/bin/scp")
 	vmBSCommand.PersistentFlags().DurationVar(&scpTimeout, "timeout", 60*time.Second,
-		"(experimental) The timeout for copying certificates")
+		"(experimental) the timeout for copying certificates")
 	vmBSCommand.PersistentFlags().StringVar(&spiffeTrustDomain, "spiffe-trust-domain", "",
-		"(experimental) The SPIFFE trust domain for the generated certs")
+		"(experimental) the SPIFFE trust domain for the generated certs")
 	vmBSCommand.PersistentFlags().BoolVar(&sshIgnoreHostKeys, "ignore-host-keys", false,
-		"(experimental) Ignore host keys on the remote host")
+		"(experimental) ignore host keys on the remote host")
 	vmBSCommand.PersistentFlags().StringVarP(&sshKeyLocation, "ssh-key", "k", "",
-		"(experimental) The location of the SSH key")
+		"(experimental) the location of the SSH key")
 	vmBSCommand.PersistentFlags().IntVar(&sshPort, "ssh-port", 22,
-		"(experimental) The port to SSH to the machine on")
+		"(experimental) the port to SSH to the machine on")
 	vmBSCommand.PersistentFlags().StringVarP(&sshUser, "ssh-user", "u", "",
-		"(experimental) The user to SSH as, defaults to the current user")
+		"(experimental) the user to SSH as, defaults to the current user")
 	vmBSCommand.PersistentFlags().BoolVar(&startIstio, "start-istio-proxy", false,
-		"Start Istio proxy on a remote host after copying certs")
+		"start Istio proxy on a remote host after copying certs")
 
 	return vmBSCommand
 }

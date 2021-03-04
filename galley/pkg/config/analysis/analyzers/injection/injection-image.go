@@ -17,7 +17,6 @@ package injection
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	v1 "k8s.io/api/core/v1"
 
@@ -108,19 +107,13 @@ func (a *ImageAnalyzer) Analyze(c analysis.Context) {
 			return true
 		}
 
-		for i, container := range pod.Spec.Containers {
+		for _, container := range pod.Spec.Containers {
 			if container.Name != util.IstioProxyName {
 				continue
 			}
 
 			if container.Image != proxyImage {
-				m := msg.NewIstioProxyImageMismatch(r, container.Image, proxyImage)
-
-				if line, ok := util.ErrorLine(r, fmt.Sprintf(util.ImageInContainer, i)); ok {
-					m.Line = line
-				}
-
-				c.Report(collections.K8SCoreV1Pods.Name(), m)
+				c.Report(collections.K8SCoreV1Pods.Name(), msg.NewIstioProxyImageMismatch(r, container.Image, proxyImage))
 			}
 		}
 
@@ -134,10 +127,6 @@ func getIstioProxyImage(cm *v1.ConfigMap) string {
 	var m injectionConfigMap
 	if err := json.Unmarshal([]byte(cm.Data["values"]), &m); err != nil {
 		return ""
-	}
-	// The injector template has a similar '{ contains "/" ... }' conditional
-	if strings.Contains(m.Global.Proxy.Image, "/") {
-		return m.Global.Proxy.Image
 	}
 	return fmt.Sprintf("%s/%s:%s", m.Global.Hub, m.Global.Proxy.Image, m.Global.Tag)
 }

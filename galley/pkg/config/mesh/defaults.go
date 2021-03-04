@@ -15,8 +15,9 @@
 package mesh
 
 import (
-	"istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pkg/config/mesh"
+
+	"istio.io/api/mesh/v1alpha1"
 )
 
 // DefaultMeshConfig returns a default meshconfig.

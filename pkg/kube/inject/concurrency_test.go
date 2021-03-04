@@ -17,8 +17,9 @@ import (
 	"reflect"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestApplyConcurrency(t *testing.T) {

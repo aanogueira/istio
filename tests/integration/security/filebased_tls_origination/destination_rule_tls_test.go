@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,10 +20,12 @@ import (
 	"testing"
 	"time"
 
+	"istio.io/istio/pkg/test/echo/common/scheme"
+
+	"istio.io/istio/pkg/test/env"
+
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/test/echo/common"
-	"istio.io/istio/pkg/test/echo/common/scheme"
-	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
@@ -70,7 +71,7 @@ spec:
 `)
 
 			var client, server echo.Instance
-			echoboot.NewBuilder(ctx).
+			echoboot.NewBuilderOrFail(t, ctx).
 				With(&client, echo.Config{
 					Service:   "client",
 					Namespace: ns,
@@ -84,7 +85,6 @@ spec:
 							Set(echo.SidecarVolume, `{"custom-certs":{"configMap":{"name":"server-certs"}}}`).
 							Set(echo.SidecarVolumeMount, `{"custom-certs":{"mountPath":"/etc/certs/custom"}}`),
 					}},
-					Cluster: ctx.Clusters().Default(),
 				}).
 				With(&server, echo.Config{
 					Service:   "server",
@@ -122,7 +122,6 @@ spec:
 						Version:     "v1",
 						Annotations: echo.NewAnnotations().SetBool(echo.SidecarInject, false),
 					}},
-					Cluster: ctx.Clusters().Default(),
 				}).
 				BuildOrFail(t)
 

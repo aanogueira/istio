@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,9 +33,21 @@ func TestMain(m *testing.M) {
 	framework.NewSuite(m).
 		RequireSingleCluster().
 		Label(label.CustomSetup).
-		Setup(istio.Setup(&ist, nil)).
+		Setup(istio.Setup(&ist, setupConfig)).
 		Setup(setupPrometheus).
 		Run()
+}
+
+func setupConfig(cfg *istio.Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.ControlPlaneValues = `
+components:
+  egressGateways:
+  - enabled: true
+    name: istio-egressgateway
+`
 }
 
 func setupPrometheus(ctx resource.Context) (err error) {

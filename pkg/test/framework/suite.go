@@ -31,12 +31,13 @@ import (
 
 	"gopkg.in/yaml.v2"
 
+	"istio.io/pkg/log"
+
 	"istio.io/istio/pkg/test/framework/components/environment/kube"
 	ferrors "istio.io/istio/pkg/test/framework/errors"
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/scopes"
-	"istio.io/pkg/log"
 )
 
 // test.Run uses 0, 1, 2 exit codes. Use different exit codes for our framework.
@@ -249,7 +250,7 @@ func (s *suiteImpl) runSetupFn(fn resource.SetupFn, ctx SuiteContext) (err error
 	defer func() {
 		// Dump if the setup function fails
 		if err != nil && ctx.Settings().CIMode {
-			rt.Dump(ctx)
+			rt.Dump()
 		}
 	}()
 	err = fn(ctx)
@@ -304,7 +305,7 @@ func (s *suiteImpl) run() (errLevel int) {
 
 	defer func() {
 		if errLevel != 0 && ctx.Settings().CIMode {
-			rt.Dump(ctx)
+			rt.Dump()
 		}
 
 		if err := rt.Close(); err != nil {
@@ -474,9 +475,6 @@ func newEnvironment(ctx resource.Context) (resource.Environment, error) {
 	s, err := kube.NewSettingsFromCommandLine()
 	if err != nil {
 		return nil, err
-	}
-	if s.Minikube {
-		return nil, fmt.Errorf("istio.test.kube.minikube is deprecated; set --istio.test.kube.loadbalancer=false instead")
 	}
 	return kube.New(ctx, s)
 }

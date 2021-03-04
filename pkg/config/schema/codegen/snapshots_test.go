@@ -73,7 +73,7 @@ func SnapshotNames() []string {
 
 	for _, c := range cases {
 		t.Run("", func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 
 			s, err := StaticSnapshots(c.packageName, &ast.Metadata{
 				Snapshots: c.snapshots,

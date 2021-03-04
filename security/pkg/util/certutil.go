@@ -18,8 +18,9 @@ import (
 	"fmt"
 	"time"
 
-	"istio.io/istio/security/pkg/pki/util"
 	"istio.io/pkg/log"
+
+	"istio.io/istio/security/pkg/pki/util"
 )
 
 // CertUtil is an interface for utility functions on certificate.

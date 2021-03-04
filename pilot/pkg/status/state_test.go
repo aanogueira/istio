@@ -19,22 +19,20 @@ import (
 	"reflect"
 	"testing"
 
-	"istio.io/api/meta/v1alpha1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/clock"
 )
 
-var statusStillPropagating = v1alpha1.IstioStatus{
-	Conditions: []*v1alpha1.IstioCondition{
-		{
-			Type:    "PassedValidation",
-			Status:  "True",
-			Message: "just a test, here",
-		},
-		{
-			Type:    "Reconciled",
-			Status:  "False",
-			Message: "1/2 proxies up to date.",
-		},
-	},
+var statusStillPropagating = IstioStatus{
+	Conditions: []IstioCondition{{
+		Type:    PassedValidation,
+		Status:  v1.ConditionTrue,
+		Message: "just a test, here",
+	}, {
+		Type:    Reconciled,
+		Status:  v1.ConditionFalse,
+		Message: "1/2 proxies up to date.",
+	}},
 	ValidationMessages: nil,
 }
 
@@ -47,7 +45,7 @@ func TestReconcileStatuses(t *testing.T) {
 		name  string
 		args  args
 		want  bool
-		want1 *v1alpha1.IstioStatus
+		want1 *IstioStatus
 	}{
 		{
 			name: "Don't Reconcile when other fields are the only diff",
@@ -63,21 +61,17 @@ func TestReconcileStatuses(t *testing.T) {
 				desired: Progress{1, 3},
 			},
 			want: true,
-			want1: &v1alpha1.IstioStatus{
-				Conditions: []*v1alpha1.IstioCondition{
-					{
-						Type:    "PassedValidation",
-						Status:  "True",
-						Message: "just a test, here",
-					},
-					{
-						Type:    "Reconciled",
-						Status:  "False",
-						Message: "1/3 proxies up to date.",
-					},
-				},
+			want1: &IstioStatus{
+				Conditions: []IstioCondition{{
+					Type:    PassedValidation,
+					Status:  v1.ConditionTrue,
+					Message: "just a test, here",
+				}, {
+					Type:    Reconciled,
+					Status:  v1.ConditionFalse,
+					Message: "1/3 proxies up to date.",
+				}},
 				ValidationMessages: nil,
-				ObservedGeneration: int64(1234),
 			},
 		}, {
 			name: "Simple Reconcile to false",
@@ -86,21 +80,17 @@ func TestReconcileStatuses(t *testing.T) {
 				desired: Progress{2, 2},
 			},
 			want: true,
-			want1: &v1alpha1.IstioStatus{
-				Conditions: []*v1alpha1.IstioCondition{
-					{
-						Type:    "PassedValidation",
-						Status:  "True",
-						Message: "just a test, here",
-					},
-					{
-						Type:    "Reconciled",
-						Status:  "True",
-						Message: "2/2 proxies up to date.",
-					},
-				},
+			want1: &IstioStatus{
+				Conditions: []IstioCondition{{
+					Type:    PassedValidation,
+					Status:  v1.ConditionTrue,
+					Message: "just a test, here",
+				}, {
+					Type:    Reconciled,
+					Status:  v1.ConditionTrue,
+					Message: "2/2 proxies up to date.",
+				}},
 				ValidationMessages: nil,
-				ObservedGeneration: int64(1234),
 			},
 		}, {
 			name: "Graceful handling of random status",
@@ -109,15 +99,12 @@ func TestReconcileStatuses(t *testing.T) {
 				desired: Progress{2, 2},
 			},
 			want: true,
-			want1: &v1alpha1.IstioStatus{
-				Conditions: []*v1alpha1.IstioCondition{
-					{
-						Type:    "Reconciled",
-						Status:  "True",
-						Message: "2/2 proxies up to date.",
-					},
-				},
-				ObservedGeneration: int64(1234),
+			want1: &IstioStatus{
+				Conditions: []IstioCondition{{
+					Type:    Reconciled,
+					Status:  v1.ConditionTrue,
+					Message: "2/2 proxies up to date.",
+				}},
 			},
 		}, {
 			name: "Reconcile for message difference",
@@ -126,26 +113,22 @@ func TestReconcileStatuses(t *testing.T) {
 				desired: Progress{2, 3},
 			},
 			want: true,
-			want1: &v1alpha1.IstioStatus{
-				Conditions: []*v1alpha1.IstioCondition{
-					{
-						Type:    "PassedValidation",
-						Status:  "True",
-						Message: "just a test, here",
-					},
-					{
-						Type:    "Reconciled",
-						Status:  "False",
-						Message: "2/3 proxies up to date.",
-					},
-				},
-				ObservedGeneration: int64(1234),
+			want1: &IstioStatus{
+				Conditions: []IstioCondition{{
+					Type:    PassedValidation,
+					Status:  v1.ConditionTrue,
+					Message: "just a test, here",
+				}, {
+					Type:    Reconciled,
+					Status:  v1.ConditionFalse,
+					Message: "2/3 proxies up to date.",
+				}},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, got1 := ReconcileStatuses(tt.args.current, tt.args.desired, int64(1234))
+			got, got1 := ReconcileStatuses(tt.args.current, tt.args.desired, clock.RealClock{})
 			if got != tt.want {
 				t.Errorf("ReconcileStatuses() got = %v, want %v", got, tt.want)
 			}
@@ -165,7 +148,7 @@ func TestReconcileStatuses(t *testing.T) {
 }
 
 func Test_getTypedStatus(t *testing.T) {
-	x := v1alpha1.IstioStatus{}
+	x := IstioStatus{}
 	b, _ := json.Marshal(statusStillPropagating)
 	_ = json.Unmarshal(b, &x)
 	type args struct {
@@ -174,7 +157,7 @@ func Test_getTypedStatus(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    args
-		wantOut v1alpha1.IstioStatus
+		wantOut IstioStatus
 		wantErr bool
 	}{
 		{

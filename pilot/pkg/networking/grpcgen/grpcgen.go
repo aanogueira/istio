@@ -19,20 +19,22 @@ import (
 	"strconv"
 	"strings"
 
-	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
-	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
+	envoycore "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
+	envoy_api_v2_route "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
+	v2 "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
+	envoy_config_listener_v2 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v2"
 	"github.com/golang/protobuf/ptypes/any"
+
+	"istio.io/pkg/log"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
-	v3 "istio.io/istio/pilot/pkg/xds/v3"
+
 	"istio.io/istio/pkg/config/host"
-	"istio.io/pkg/log"
 )
 
+// To avoid a recoursive depenency to v2.
 const (
 	typePrefix = "type.googleapis.com/envoy.api.v2."
 
@@ -65,15 +67,13 @@ const (
 type GrpcConfigGenerator struct {
 }
 
-func (g *GrpcConfigGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, req *model.PushRequest) model.Resources {
-	// TODO: Eventhough grpc-go supports v3 at the transport layer, it still sends v2 types
-	// in the requests. Fix this when it starts sending v3 types.
+func (g *GrpcConfigGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates model.XdsUpdates) model.Resources {
 	switch w.TypeUrl {
-	case ListenerType, v3.ListenerType:
+	case ListenerType:
 		return g.BuildListeners(proxy, push, w.ResourceNames)
-	case ClusterType, v3.ClusterType:
+	case ClusterType:
 		return g.BuildClusters(proxy, push, w.ResourceNames)
-	case RouteType, v3.RouteType:
+	case RouteType:
 		return g.BuildHTTPRoutes(proxy, push, w.ResourceNames)
 	}
 
@@ -108,39 +108,29 @@ func (g *GrpcConfigGenerator) BuildListeners(node *model.Proxy, push *model.Push
 			}
 			for _, p := range sv.Ports {
 				hp := net.JoinHostPort(shost, strconv.Itoa(p.Port))
-				ll := &listener.Listener{
+				ll := &xdsapi.Listener{
 					Name: hp,
 				}
 
-				ll.Address = &core.Address{
-					Address: &core.Address_SocketAddress{
-						SocketAddress: &core.SocketAddress{
+				ll.Address = &envoycore.Address{
+					Address: &envoycore.Address_SocketAddress{
+						SocketAddress: &envoycore.SocketAddress{
 							Address: sv.Address,
-							PortSpecifier: &core.SocketAddress_PortValue{
+							PortSpecifier: &envoycore.SocketAddress_PortValue{
 								PortValue: uint32(p.Port),
 							},
 						},
 					},
 				}
-				hcm := &hcm.HttpConnectionManager{
-					RouteSpecifier: &hcm.HttpConnectionManager_Rds{
-						Rds: &hcm.Rds{
-							ConfigSource: &core.ConfigSource{
-								ConfigSourceSpecifier: &core.ConfigSource_Ads{
-									Ads: &core.AggregatedConfigSource{},
-								},
-							},
-							RouteConfigName: hp,
-						},
-					},
-				}
-				hcmAny := util.MessageToAny(hcm)
-				// TODO: grpc-go still expects the v2 Http connection manager TypeUrl. Fix this when it is changed.
-				// https://github.com/grpc/grpc-go/blob/master/xds/internal/version/version.go#L48.
-				hcmAny.TypeUrl = "type.googleapis.com/envoy.config.filter.network.http_connection_manager.v2.HttpConnectionManager"
 				// TODO: for TCP listeners don't generate RDS, but some indication of cluster name.
-				ll.ApiListener = &listener.ApiListener{
-					ApiListener: hcmAny,
+				ll.ApiListener = &envoy_config_listener_v2.ApiListener{
+					ApiListener: util.MessageToAny(&v2.HttpConnectionManager{
+						RouteSpecifier: &v2.HttpConnectionManager_Rds{
+							Rds: &v2.Rds{
+								RouteConfigName: hp,
+							},
+						},
+					}),
 				}
 				resp = append(resp, util.MessageToAny(ll))
 			}
@@ -162,14 +152,14 @@ func (g *GrpcConfigGenerator) BuildClusters(node *model.Proxy, push *model.PushC
 			log.Warna("Failed to parse ", n, " ", err)
 			continue
 		}
-		rc := &cluster.Cluster{
+		rc := &xdsapi.Cluster{
 			Name:                 n,
-			ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS},
-			EdsClusterConfig: &cluster.Cluster_EdsClusterConfig{
+			ClusterDiscoveryType: &xdsapi.Cluster_Type{Type: xdsapi.Cluster_EDS},
+			EdsClusterConfig: &xdsapi.Cluster_EdsClusterConfig{
 				ServiceName: "outbound|" + portn + "||" + hn,
-				EdsConfig: &core.ConfigSource{
-					ConfigSourceSpecifier: &core.ConfigSource_Ads{
-						Ads: &core.AggregatedConfigSource{},
+				EdsConfig: &envoycore.ConfigSource{
+					ConfigSourceSpecifier: &envoycore.ConfigSource_Ads{
+						Ads: &envoycore.AggregatedConfigSource{},
 					},
 				},
 			},
@@ -187,6 +177,9 @@ func (g *GrpcConfigGenerator) BuildHTTPRoutes(node *model.Proxy, push *model.Pus
 
 	// Currently this mode is only used by GRPC, to extract Cluster for the default
 	// route.
+	// Current GRPC is also expecting the default route to be prefix=="", while we generate "/"
+	// in normal response.
+	// TODO: add support for full route, make sure GRPC is fixed to support both
 	for _, n := range routeNames {
 		hn, portn, err := net.SplitHostPort(n)
 		if err != nil {
@@ -206,21 +199,21 @@ func (g *GrpcConfigGenerator) BuildHTTPRoutes(node *model.Proxy, push *model.Pus
 			if s.Hostname.Matches(host.Name(hn)) {
 				// Only generate the required route for grpc. Will need to generate more
 				// as GRPC adds more features.
-				rc := &route.RouteConfiguration{
+				rc := &xdsapi.RouteConfiguration{
 					Name: n,
-					VirtualHosts: []*route.VirtualHost{
+					VirtualHosts: []*envoy_api_v2_route.VirtualHost{
 						{
 							Name:    hn,
 							Domains: []string{hn, n},
 
-							Routes: []*route.Route{
+							Routes: []*envoy_api_v2_route.Route{
 								{
-									Match: &route.RouteMatch{
-										PathSpecifier: &route.RouteMatch_Prefix{Prefix: ""},
+									Match: &envoy_api_v2_route.RouteMatch{
+										PathSpecifier: &envoy_api_v2_route.RouteMatch_Prefix{Prefix: ""},
 									},
-									Action: &route.Route_Route{
-										Route: &route.RouteAction{
-											ClusterSpecifier: &route.RouteAction_Cluster{
+									Action: &envoy_api_v2_route.Route_Route{
+										Route: &envoy_api_v2_route.RouteAction{
+											ClusterSpecifier: &envoy_api_v2_route.RouteAction_Cluster{
 												Cluster: n,
 											},
 										},

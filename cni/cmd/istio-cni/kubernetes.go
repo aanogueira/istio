@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 
+	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -69,7 +70,9 @@ func getK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (
 	}
 	containers = make([]string, len(pod.Spec.Containers))
 	for containerIdx, container := range pod.Spec.Containers {
-		log.WithLabels("pod", podName, "container", container.Name).Debug("Inspecting container")
+		log.Debug("Inspecting container",
+			zap.String("pod", podName),
+			zap.String("container", container.Name))
 		containers[containerIdx] = container.Name
 
 		if container.Name == "istio-proxy" {

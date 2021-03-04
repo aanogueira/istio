@@ -28,13 +28,14 @@ import (
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/pkg/log"
+
+	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
-	"istio.io/pkg/log"
 )
 
 const (
@@ -80,7 +81,7 @@ func decodeIngressRuleName(name string) (ingressName string, ruleNum, pathNum in
 var defaultSelector = labels.Instance{constants.IstioLabel: constants.IstioIngressLabelValue}
 
 // ConvertIngressV1alpha3 converts from ingress spec to Istio Gateway
-func ConvertIngressV1alpha3(ingress v1beta1.Ingress, mesh *meshconfig.MeshConfig, domainSuffix string) config.Config {
+func ConvertIngressV1alpha3(ingress v1beta1.Ingress, mesh *meshconfig.MeshConfig, domainSuffix string) model.Config {
 	gateway := &networking.Gateway{}
 	// Setup the selector for the gateway
 	if len(mesh.IngressSelector) > 0 {
@@ -128,8 +129,8 @@ func ConvertIngressV1alpha3(ingress v1beta1.Ingress, mesh *meshconfig.MeshConfig
 		Hosts: []string{"*"},
 	})
 
-	gatewayConfig := config.Config{
-		Meta: config.Meta{
+	gatewayConfig := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: gvk.Gateway,
 			Name:             ingress.Name + "-" + constants.IstioIngressGatewayName,
 			Namespace:        ingressNamespace,
@@ -142,7 +143,7 @@ func ConvertIngressV1alpha3(ingress v1beta1.Ingress, mesh *meshconfig.MeshConfig
 }
 
 // ConvertIngressVirtualService converts from ingress spec to Istio VirtualServices
-func ConvertIngressVirtualService(ingress v1beta1.Ingress, domainSuffix string, ingressByHost map[string]*config.Config, serviceLister listerv1.ServiceLister) {
+func ConvertIngressVirtualService(ingress v1beta1.Ingress, domainSuffix string, ingressByHost map[string]*model.Config, serviceLister listerv1.ServiceLister) {
 	// Ingress allows a single host - if missing '*' is assumed
 	// We need to merge all rules with a particular host across
 	// all ingresses, and return a separate VirtualService for each
@@ -207,8 +208,8 @@ func ConvertIngressVirtualService(ingress v1beta1.Ingress, domainSuffix string, 
 
 		virtualService.Http = httpRoutes
 
-		virtualServiceConfig := config.Config{
-			Meta: config.Meta{
+		virtualServiceConfig := model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.VirtualService,
 				Name:             namePrefix + "-" + ingress.Name + "-" + constants.IstioIngressGatewayName,
 				Namespace:        ingress.Namespace,

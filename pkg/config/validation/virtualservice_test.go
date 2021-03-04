@@ -21,10 +21,12 @@ import (
 	"github.com/gogo/protobuf/types"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pkg/config"
+
+	"istio.io/istio/pilot/pkg/features"
 )
 
 func TestValidateChainingVirtualService(t *testing.T) {
+	features.EnableVirtualServiceDelegate = true
 	testCases := []struct {
 		name  string
 		in    proto.Message
@@ -135,13 +137,13 @@ func TestValidateChainingVirtualService(t *testing.T) {
 					}},
 				}},
 			},
-			valid: true,
+			valid: false,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := ValidateVirtualService(config.Config{Spec: tc.in}); (err == nil) != tc.valid {
+			if err := ValidateVirtualService("", "", tc.in); (err == nil) != tc.valid {
 				t.Fatalf("got valid=%v but wanted valid=%v: %v", err == nil, tc.valid, err)
 			}
 		})
@@ -322,8 +324,8 @@ func TestValidateRootHTTPRoute(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateHTTPRoute(tc.route, false); (err.Err == nil) != tc.valid {
-				t.Fatalf("got valid=%v but wanted valid=%v: %v", err.Err == nil, tc.valid, err)
+			if err := validateRootHTTPRoute(tc.route); (err == nil) != tc.valid {
+				t.Fatalf("got valid=%v but wanted valid=%v: %v", err == nil, tc.valid, err)
 			}
 		})
 	}
@@ -552,8 +554,8 @@ func TestValidateDelegateHTTPRoute(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateHTTPRoute(tc.route, true); (err.Err == nil) != tc.valid {
-				t.Fatalf("got valid=%v but wanted valid=%v: %v", err.Err == nil, tc.valid, err)
+			if err := validateDelegateHTTPRoute(tc.route); (err == nil) != tc.valid {
+				t.Fatalf("got valid=%v but wanted valid=%v: %v", err == nil, tc.valid, err)
 			}
 		})
 	}

@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"istio.io/istio/tests/integration/security/util"
+
 	"istio.io/istio/pkg/test/echo/common/scheme"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
@@ -28,7 +29,6 @@ import (
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/test/util/tmpl"
-	"istio.io/istio/tests/integration/security/util"
 	"istio.io/istio/tests/integration/security/util/connection"
 )
 
@@ -50,9 +50,9 @@ func TestSdsVaultCaFlow(t *testing.T) {
 			})
 
 			var a, b echo.Instance
-			echoboot.NewBuilder(ctx).
-				With(&a, util.EchoConfig("a", ns, false, nil, nil)).
-				With(&b, util.EchoConfig("b", ns, false, nil, nil)).
+			echoboot.NewBuilderOrFail(t, ctx).
+				With(&a, util.EchoConfig("a", ns, false, nil)).
+				With(&b, util.EchoConfig("b", ns, false, nil)).
 				BuildOrFail(t)
 
 			checkers := []connection.Checker{

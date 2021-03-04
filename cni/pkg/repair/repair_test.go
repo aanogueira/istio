@@ -26,8 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
-
-	"istio.io/istio/tools/istio-iptables/pkg/constants"
 )
 
 func TestBrokenPodReconciler_detectPod(t *testing.T) {
@@ -36,7 +34,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			PodName:     name,
 			Annotations: map[string]string{"sidecar.istio.io/status": "something"},
 			InitContainerStatus: &v1.ContainerStatus{
-				Name: constants.ValidationContainerName,
+				Name: ValidationContainerName,
 				State: v1.ContainerState{
 					Waiting: &v1.ContainerStateWaiting{
 						Reason:  "CrashLoopBackOff",
@@ -71,7 +69,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -84,7 +82,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -97,7 +95,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -110,7 +108,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -123,7 +121,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 55,
 				},
 				&Options{},
@@ -136,7 +134,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -149,7 +147,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:               "sidecar.istio.io/status",
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerTerminationMessage: "Termination Message",
 				},
 				&Options{},
@@ -167,7 +165,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:               "sidecar.istio.io/status",
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerTerminationMessage: "Termination Message",
 				},
 				&Options{},
@@ -185,7 +183,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:               "sidecar.istio.io/status",
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerTerminationMessage: "            Termination Message",
 				},
 				&Options{},
@@ -203,7 +201,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -221,7 +219,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -239,7 +237,7 @@ func TestBrokenPodReconciler_detectPod(t *testing.T) {
 			fields{
 				&Filters{
 					SidecarAnnotation:     "sidecar.istio.io/status",
-					InitContainerName:     constants.ValidationContainerName,
+					InitContainerName:     ValidationContainerName,
 					InitContainerExitCode: 126,
 				},
 				&Options{},
@@ -289,7 +287,7 @@ func TestBrokenPodReconciler_listBrokenPods(t *testing.T) {
 				client: fake.NewSimpleClientset(&workingPodDiedPreviously, &workingPod),
 				Filters: &Filters{
 					SidecarAnnotation:               "sidecar.istio.io/status",
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerTerminationMessage: "Died for some reason",
 					InitContainerExitCode:           126,
 				},
@@ -303,13 +301,13 @@ func TestBrokenPodReconciler_listBrokenPods(t *testing.T) {
 				client: fake.NewSimpleClientset(&workingPodDiedPreviously, &workingPod, &brokenPodWaiting, &brokenPodNoAnnotation, &brokenPodTerminating),
 				Filters: &Filters{
 					SidecarAnnotation:               "sidecar.istio.io/status",
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerTerminationMessage: "Died for some reason",
 					InitContainerExitCode:           126,
 				},
 				Options: &Options{},
 			},
-			wantList: v1.PodList{Items: []v1.Pod{brokenPodTerminating, brokenPodWaiting}},
+			wantList: v1.PodList{Items: []v1.Pod{brokenPodWaiting, brokenPodTerminating}},
 		},
 		{
 			name: "With Label Selector",
@@ -317,7 +315,7 @@ func TestBrokenPodReconciler_listBrokenPods(t *testing.T) {
 				client: fake.NewSimpleClientset(&workingPodDiedPreviously, &workingPod, &brokenPodWaiting, &brokenPodNoAnnotation, &brokenPodTerminating),
 				Filters: &Filters{
 					SidecarAnnotation:               "sidecar.istio.io/status",
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerTerminationMessage: "Died for some reason",
 					InitContainerExitCode:           126,
 					LabelSelectors:                  "testlabel=true",
@@ -332,7 +330,7 @@ func TestBrokenPodReconciler_listBrokenPods(t *testing.T) {
 				client: fake.NewSimpleClientset(&workingPodDiedPreviously, &workingPod, &brokenPodWaiting, &brokenPodNoAnnotation, &brokenPodTerminating),
 				Filters: &Filters{
 					SidecarAnnotation:               "some.other.sidecar/annotation",
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerTerminationMessage: "Died for some reason",
 					InitContainerExitCode:           126,
 					LabelSelectors:                  "testlabel=true",
@@ -443,7 +441,7 @@ func TestBrokenPodReconciler_labelBrokenPods(t *testing.T) {
 			fields: fields{
 				client: labelBrokenPodsClientset(workingPod, workingPodDiedPreviously),
 				Filters: &Filters{
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerExitCode:           126,
 					InitContainerTerminationMessage: "Died for some reason",
 				},
@@ -457,7 +455,7 @@ func TestBrokenPodReconciler_labelBrokenPods(t *testing.T) {
 			fields: fields{
 				client: labelBrokenPodsClientset(workingPod, workingPodDiedPreviously, brokenPodWaiting),
 				Filters: &Filters{
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerExitCode:           126,
 					InitContainerTerminationMessage: "Died for some reason",
 				},
@@ -471,7 +469,7 @@ func TestBrokenPodReconciler_labelBrokenPods(t *testing.T) {
 			fields: fields{
 				client: labelBrokenPodsClientset(workingPod, workingPodDiedPreviously, brokenPodTerminating),
 				Filters: &Filters{
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerExitCode:           126,
 					InitContainerTerminationMessage: "Died for some reason",
 				},
@@ -521,7 +519,7 @@ func TestBrokenPodReconciler_deleteBrokenPods(t *testing.T) {
 			fields: fields{
 				client: labelBrokenPodsClientset(workingPod, workingPodDiedPreviously),
 				Filters: &Filters{
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerExitCode:           126,
 					InitContainerTerminationMessage: "Died for some reason",
 				},
@@ -535,7 +533,7 @@ func TestBrokenPodReconciler_deleteBrokenPods(t *testing.T) {
 			fields: fields{
 				client: labelBrokenPodsClientset(workingPod, workingPodDiedPreviously, brokenPodWaiting),
 				Filters: &Filters{
-					InitContainerName:               constants.ValidationContainerName,
+					InitContainerName:               ValidationContainerName,
 					InitContainerExitCode:           126,
 					InitContainerTerminationMessage: "Died for some reason",
 				},

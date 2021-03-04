@@ -56,15 +56,17 @@ The available features and the components that comprise each feature are as foll
 
 | Feature | Components |
 |---------|------------|
-CRDs, and other cluster wide configs | Base
+Base | CRDs
 Traffic Management | Pilot
-Security | Pilot
-Configuration management | Pilot
-AutoInjection | Pilot
+Policy | Policy
+Telemetry | Telemetry
+Security | Citadel
+Security | Node agent
+Security | Cert manager
+Configuration management | Galley
 Gateways | Ingress gateway
 Gateways | Egress gateway
-Policy | Policy (deprecated)
-Telemetry | Telemetry (deprecated)
+AutoInjection | Sidecar injector
 
 Features and components are defined in the
 [name](https://github.com/istio/operator/blob/e9097258cb4fbe59648e7da663cdad6f16927b8f/pkg/name/name.go#L44) package.
@@ -91,27 +93,24 @@ namespace is defined as:
 defaultNamespace: istio-system
 ```
 
-and namespaces are specialized for the gateway feature and its components:
+and namespaces are specialized for the security feature and one of the components:
 
 ```yaml
-apiVersion: install.istio.io/v1alpha1
-kind: IstioOperator
-metadata:
-  namespace: istio-operator
-spec:
+security:
   components:
-    ingressGateways:
-    - name: istio-ingressgateway
-      enabled: true
-      namespace: istio-gateways
+    namespace: istio-security
+    citadel:
+policy:
+  components:
+    policy:
 ```
 
 the resulting namespaces will be:
 
 | Component | Namespace |
 | --------- | :-------- |
-ingressGateways | istio-gateways
-
+policy | istio-system
+citadel | istio-security
 These rules are expressed in code in the
 [name](https://github.com/istio/operator/blob/e9097258cb4fbe59648e7da663cdad6f16927b8f/pkg/name/name.go#L246) package.
 
@@ -122,11 +121,14 @@ components are disabled, regardless of their component-level enablement. If a fe
 are enabled, unless they are individually disabled. For example:
 
 ```yaml
-    telemetry:
-      enabled: true
-      v2:
-        enabled: false
+security:
+  enabled: true
+  components:
+    citadel:
+      enabled: false
 ```
+
+will enable all components of the security feature except citadel.
 
 These rules are expressed in code in the
 [name](https://github.com/istio/operator/blob/e9097258cb4fbe59648e7da663cdad6f16927b8f/pkg/name/name.go#L131) package.

@@ -25,10 +25,12 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/protobuf/jsonpb"
+
 	"gopkg.in/d4l3k/messagediff.v1"
-	"k8s.io/client-go/util/jsonpath"
 
 	"istio.io/istio/pkg/test"
+
+	"k8s.io/client-go/util/jsonpath"
 )
 
 var (

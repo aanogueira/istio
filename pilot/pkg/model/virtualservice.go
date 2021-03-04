@@ -20,15 +20,14 @@ import (
 	"github.com/gogo/protobuf/jsonpb"
 
 	networking "istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pilot/pkg/features"
-	"istio.io/istio/pilot/pkg/util/sets"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/visibility"
 )
 
-func resolveVirtualServiceShortnames(rule *networking.VirtualService, meta config.Meta) {
+func resolveVirtualServiceShortnames(rule *networking.VirtualService, meta ConfigMeta) {
 	// resolve top level hosts
 	for i, h := range rule.Hosts {
 		rule.Hosts[i] = string(ResolveShortnameToFQDN(h, meta))
@@ -72,7 +71,7 @@ func resolveVirtualServiceShortnames(rule *networking.VirtualService, meta confi
 			}
 		}
 	}
-	// resolve host in tls route.destination
+	//resolve host in tls route.destination
 	for _, tls := range rule.Tls {
 		for _, m := range tls.Match {
 			for i, g := range m.Gateways {
@@ -91,13 +90,13 @@ func resolveVirtualServiceShortnames(rule *networking.VirtualService, meta confi
 
 // Return merged virtual services and the root->delegate vs map
 func mergeVirtualServicesIfNeeded(
-	vServices []config.Config,
-	defaultExportTo map[visibility.Instance]bool) ([]config.Config, map[ConfigKey][]ConfigKey) {
-	out := make([]config.Config, 0, len(vServices))
-	delegatesMap := map[string]config.Config{}
+	vServices []Config,
+	defaultExportTo map[visibility.Instance]bool) ([]Config, map[ConfigKey][]ConfigKey) {
+	out := make([]Config, 0, len(vServices))
+	delegatesMap := map[string]Config{}
 	delegatesExportToMap := map[string]map[visibility.Instance]bool{}
 	// root virtualservices with delegate
-	var rootVses []config.Config
+	var rootVses []Config
 
 	// 1. classify virtualservices
 	for _, vs := range vServices {
@@ -334,24 +333,7 @@ func mergeHTTPMatchRequest(root, delegate *networking.HTTPMatchRequest) *network
 		out.Port = root.Port
 	}
 
-	// SourceLabels
-	if len(root.SourceLabels) > 0 || len(delegate.SourceLabels) > 0 {
-		out.SourceLabels = make(map[string]string)
-	}
-	for k, v := range root.SourceLabels {
-		out.SourceLabels[k] = v
-	}
-	for k, v := range delegate.SourceLabels {
-		out.SourceLabels[k] = v
-	}
-
-	if out.SourceNamespace == "" {
-		out.SourceNamespace = root.SourceNamespace
-	}
-
-	if len(out.Gateways) == 0 {
-		out.Gateways = root.Gateways
-	}
+	// SourceLabels, SourceNamespace and Gateways only apply to sidecar, ignore here
 
 	return &out
 }
@@ -392,30 +374,8 @@ func hasConflict(root, leaf *networking.HTTPMatchRequest) bool {
 		return true
 	}
 
-	// sourceNamespace
-	if root.SourceNamespace != "" && leaf.SourceNamespace != root.SourceNamespace {
-		return true
-	}
-
-	// sourceLabels should not conflict, root should have superset of sourceLabels.
-	for key, leafValue := range leaf.SourceLabels {
-		if v, ok := root.SourceLabels[key]; ok && v != leafValue {
-			return true
-		}
-	}
-
-	// gateways should not conflict, root should have superset of gateways.
-	if len(root.Gateways) > 0 && len(leaf.Gateways) > 0 {
-		if len(root.Gateways) < len(leaf.Gateways) {
-			return true
-		}
-		rootGateway := sets.NewSet(root.Gateways...)
-		for _, gw := range leaf.Gateways {
-			if !rootGateway.Contains(gw) {
-				return true
-			}
-		}
-	}
+	// sourceLabels, sourceNamespace and gateways do not apply to delegate
+	// and are empty, so no conflict for them.
 
 	return false
 }

@@ -20,11 +20,12 @@ import (
 	"strings"
 
 	"istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/labels"
+
 	"istio.io/pkg/log"
 )
 
@@ -73,8 +74,8 @@ func matchTCP(match *v1alpha3.L4MatchAttributes, proxyLabels labels.Collection, 
 }
 
 // Select the config pertaining to the service being processed.
-func getConfigsForHost(hostname host.Name, configs []config.Config) []config.Config {
-	svcConfigs := make([]config.Config, 0)
+func getConfigsForHost(hostname host.Name, configs []model.Config) []model.Config {
+	svcConfigs := make([]model.Config, 0)
 	for index := range configs {
 		virtualService := configs[index].Spec.(*v1alpha3.VirtualService)
 		for _, vsHost := range virtualService.Hosts {
@@ -94,7 +95,7 @@ func hashRuntimeTLSMatchPredicates(match *v1alpha3.TLSMatchAttributes) string {
 
 func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushContext, destinationCIDR string,
 	service *model.Service, listenPort *model.Port,
-	gateways map[string]bool, configs []config.Config) []*filterChainOpts {
+	gateways map[string]bool, configs []model.Config) []*filterChainOpts {
 
 	if !listenPort.Protocol.IsTLS() {
 		return nil
@@ -144,10 +145,10 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
 					matchHash := hashRuntimeTLSMatchPredicates(match)
 					if !matchHasBeenHandled[matchHash] {
 						out = append(out, &filterChainOpts{
-							metadata:         util.BuildConfigInfoMetadata(cfg.Meta),
+							metadata:         util.BuildConfigInfoMetadata(cfg.ConfigMeta),
 							sniHosts:         match.SniHosts,
 							destinationCIDRs: destinationCIDRs,
-							networkFilters:   buildOutboundNetworkFilters(node, tls.Route, push, listenPort, cfg.Meta),
+							networkFilters:   buildOutboundNetworkFilters(node, tls.Route, push, listenPort, cfg.ConfigMeta),
 						})
 						hasTLSMatch = true
 					}
@@ -182,8 +183,7 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
 		// having to generate expensive permutations of the host name just like RDS does..
 		// NOTE that we cannot have two services with the same VIP as our listener build logic will treat it as a collision and
 		// ignore one of the services.
-		// TODO: https://github.com/istio/istio/issues/27677 reconsider this logic
-		svcListenAddress := service.GetServiceAddressForProxy(node, push)
+		svcListenAddress := service.GetServiceAddressForProxy(node)
 		if strings.Contains(svcListenAddress, "/") {
 			// Address is a CIDR, already captured by destinationCIDR parameter.
 			svcListenAddress = ""
@@ -205,7 +205,7 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
 
 func buildSidecarOutboundTCPFilterChainOpts(node *model.Proxy, push *model.PushContext, destinationCIDR string,
 	service *model.Service, listenPort *model.Port,
-	gateways map[string]bool, configs []config.Config) []*filterChainOpts {
+	gateways map[string]bool, configs []model.Config) []*filterChainOpts {
 
 	if listenPort.Protocol.IsTLS() {
 		return nil
@@ -225,9 +225,9 @@ TcpLoop:
 			if len(tcp.Match) == 0 {
 				// implicit match
 				out = append(out, &filterChainOpts{
-					metadata:         util.BuildConfigInfoMetadata(cfg.Meta),
+					metadata:         util.BuildConfigInfoMetadata(cfg.ConfigMeta),
 					destinationCIDRs: destinationCIDRs,
-					networkFilters:   buildOutboundNetworkFilters(node, tcp.Route, push, listenPort, cfg.Meta),
+					networkFilters:   buildOutboundNetworkFilters(node, tcp.Route, push, listenPort, cfg.ConfigMeta),
 				})
 				defaultRouteAdded = true
 				break TcpLoop
@@ -249,9 +249,9 @@ TcpLoop:
 					// (this is similar to virtual hosts in http) and create filter chain match accordingly.
 					if len(match.DestinationSubnets) == 0 || listenPort.Port == 0 {
 						out = append(out, &filterChainOpts{
-							metadata:         util.BuildConfigInfoMetadata(cfg.Meta),
+							metadata:         util.BuildConfigInfoMetadata(cfg.ConfigMeta),
 							destinationCIDRs: destinationCIDRs,
-							networkFilters:   buildOutboundNetworkFilters(node, tcp.Route, push, listenPort, cfg.Meta),
+							networkFilters:   buildOutboundNetworkFilters(node, tcp.Route, push, listenPort, cfg.ConfigMeta),
 						})
 						defaultRouteAdded = true
 						break TcpLoop
@@ -264,7 +264,7 @@ TcpLoop:
 			if len(virtualServiceDestinationSubnets) > 0 {
 				out = append(out, &filterChainOpts{
 					destinationCIDRs: virtualServiceDestinationSubnets,
-					networkFilters:   buildOutboundNetworkFilters(node, tcp.Route, push, listenPort, cfg.Meta),
+					networkFilters:   buildOutboundNetworkFilters(node, tcp.Route, push, listenPort, cfg.ConfigMeta),
 				})
 
 				// If at this point there is a filter chain generated with the same CIDR match as the
@@ -311,11 +311,11 @@ TcpLoop:
 // In the latter case, there is no service associated with this listen port. So we have to account for this
 // missing service throughout this file
 func buildSidecarOutboundTCPTLSFilterChainOpts(node *model.Proxy, push *model.PushContext,
-	configs []config.Config, destinationCIDR string, service *model.Service, listenPort *model.Port,
+	configs []model.Config, destinationCIDR string, service *model.Service, listenPort *model.Port,
 	gateways map[string]bool) []*filterChainOpts {
 
 	out := make([]*filterChainOpts, 0)
-	var svcConfigs []config.Config
+	var svcConfigs []model.Config
 	if service != nil {
 		svcConfigs = getConfigsForHost(service.Hostname, configs)
 	} else {

@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,6 +29,7 @@ import (
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+	"istio.io/istio/pkg/test/framework/components/environment/kube"
 	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/retry"
@@ -103,12 +103,8 @@ spec:
 // - Secure naming information is respected in the mTLS handshake.
 func TestSecureNaming(t *testing.T) {
 	framework.NewTest(t).
-		Features("security.peer.secure-naming").
+		Features("security.peer.secure-naming", "security.control-plane.plugin-cert").
 		Run(func(ctx framework.TestContext) {
-			//TODO: remove the skip when https://github.com/istio/istio/issues/28798 is fixed
-			if ctx.Clusters().IsMulticluster() {
-				ctx.Skip()
-			}
 			istioCfg := istio.DefaultConfigOrFail(t, ctx)
 			testNamespace := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "secure-naming",
@@ -121,9 +117,9 @@ func TestSecureNaming(t *testing.T) {
 				return checkCACert(ctx, t, testNamespace)
 			}, retry.Delay(time.Second), retry.Timeout(10*time.Second))
 			var a, b echo.Instance
-			echoboot.NewBuilder(ctx).
-				With(&a, util.EchoConfig("a", testNamespace, false, nil, nil)).
-				With(&b, util.EchoConfig("b", testNamespace, false, nil, nil)).
+			echoboot.NewBuilderOrFail(ctx, ctx).
+				With(&a, util.EchoConfig("a", testNamespace, false, nil)).
+				With(&b, util.EchoConfig("b", testNamespace, false, nil)).
 				BuildOrFail(t)
 
 			ctx.NewSubTest("mTLS cert validation with plugin CA").
@@ -229,7 +225,8 @@ func verifyCertificatesWithPluginCA(t *testing.T, dump string) {
 
 func checkCACert(testCtx framework.TestContext, t *testing.T, testNamespace namespace.Instance) error {
 	configMapName := "istio-ca-root-cert"
-	cm, err := testCtx.Clusters().Default().CoreV1().ConfigMaps(testNamespace.Name()).Get(context.TODO(), configMapName,
+	env := testCtx.Environment().(*kube.Environment)
+	cm, err := env.KubeClusters[0].CoreV1().ConfigMaps(testNamespace.Name()).Get(context.TODO(), configMapName,
 		kubeApiMeta.GetOptions{})
 	if err != nil {
 		return err

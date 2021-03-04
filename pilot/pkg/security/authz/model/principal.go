@@ -67,18 +67,10 @@ func principalAuthenticated(name *matcherpb.StringMatcher) *rbacpb.Principal {
 	}
 }
 
-func principalDirectRemoteIP(cidr *corepb.CidrRange) *rbacpb.Principal {
+func principalSourceIP(cidr *corepb.CidrRange) *rbacpb.Principal {
 	return &rbacpb.Principal{
-		Identifier: &rbacpb.Principal_DirectRemoteIp{
-			DirectRemoteIp: cidr,
-		},
-	}
-}
-
-func principalRemoteIP(cidr *corepb.CidrRange) *rbacpb.Principal {
-	return &rbacpb.Principal{
-		Identifier: &rbacpb.Principal_RemoteIp{
-			RemoteIp: cidr,
+		Identifier: &rbacpb.Principal_SourceIp{
+			SourceIp: cidr,
 		},
 	}
 }

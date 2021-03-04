@@ -46,19 +46,16 @@ type manifestGenerateArgs struct {
 	manifestsPath string
 	// revision is the Istio control plane revision the command targets.
 	revision string
-	// components is a list of strings specifying which component's manifests to be generated.
-	components []string
 }
 
 func addManifestGenerateFlags(cmd *cobra.Command, args *manifestGenerateArgs) {
 	cmd.PersistentFlags().StringSliceVarP(&args.inFilename, "filename", "f", nil, filenameFlagHelpStr)
 	cmd.PersistentFlags().StringVarP(&args.outFilename, "output", "o", "", "Manifest output directory path.")
 	cmd.PersistentFlags().StringArrayVarP(&args.set, "set", "s", nil, setFlagHelpStr)
-	cmd.PersistentFlags().BoolVar(&args.force, "force", false, ForceFlagHelpStr)
+	cmd.PersistentFlags().BoolVar(&args.force, "force", false, "Proceed even with validation errors.")
 	cmd.PersistentFlags().StringVarP(&args.manifestsPath, "charts", "", "", ChartsDeprecatedStr)
 	cmd.PersistentFlags().StringVarP(&args.manifestsPath, "manifests", "d", "", ManifestsFlagHelpStr)
 	cmd.PersistentFlags().StringVarP(&args.revision, "revision", "r", "", revisionFlagHelpStr)
-	cmd.PersistentFlags().StringSliceVar(&args.components, "component", nil, ComponentFlagHelpStr)
 }
 
 func manifestGenerateCmd(rootArgs *rootArgs, mgArgs *manifestGenerateArgs, logOpts *log.Options) *cobra.Command {
@@ -100,19 +97,6 @@ func manifestGenerate(args *rootArgs, mgArgs *manifestGenerateArgs, logopts *log
 	manifests, _, err := manifest.GenManifests(mgArgs.inFilename, applyFlagAliases(mgArgs.set, mgArgs.manifestsPath, mgArgs.revision), mgArgs.force, nil, l)
 	if err != nil {
 		return err
-	}
-
-	if len(mgArgs.components) != 0 {
-		filteredManifests := name.ManifestMap{}
-		for _, cArg := range mgArgs.components {
-			componentName := name.ComponentName(cArg)
-			if cManifests, ok := manifests[componentName]; ok {
-				filteredManifests[componentName] = cManifests
-			} else {
-				return fmt.Errorf("incorrect component name: %s. Valid options: %v", cArg, name.AllComponentNames)
-			}
-		}
-		manifests = filteredManifests
 	}
 
 	if mgArgs.outFilename == "" {

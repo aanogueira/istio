@@ -192,7 +192,7 @@ func Build(astm *ast.Metadata) (*Metadata, error) {
 			return nil, fmt.Errorf("failed locating proto validation function %s", ar.Validate)
 		}
 
-		r := resource.Builder{
+		r, err := resource.Builder{
 			ClusterScoped: ar.ClusterScoped,
 			Kind:          ar.Kind,
 			Plural:        ar.Plural,
@@ -201,7 +201,10 @@ func Build(astm *ast.Metadata) (*Metadata, error) {
 			Proto:         ar.Proto,
 			ProtoPackage:  ar.ProtoPackage,
 			ValidateProto: validateFn,
-		}.BuildNoValidate()
+		}.Build()
+		if err != nil {
+			return nil, err
+		}
 
 		key := resourceKey(ar.Group, ar.Kind)
 		if _, ok := resources[key]; ok {

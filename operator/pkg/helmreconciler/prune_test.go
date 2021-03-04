@@ -18,7 +18,6 @@ import (
 	"context"
 	"io/ioutil"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -56,16 +55,7 @@ func TestHelmReconciler_DeleteControlPlaneByManifest(t *testing.T) {
 		iop.Spec.Revision = testRevision
 		iop.Spec.InstallPackagePath = filepath.Join(env.IstioSrc, "manifests")
 
-		h := &HelmReconciler{
-			client: cl,
-			opts: &Options{
-				ProgressLog: progress.NewLog(),
-				Log:         clog.NewDefaultLogger(),
-			},
-			iop:           iop,
-			countLock:     &sync.Mutex{},
-			prunedKindSet: map[schema.GroupKind]struct{}{},
-		}
+		h := &HelmReconciler{client: cl, opts: &Options{ProgressLog: progress.NewLog(), Log: clog.NewDefaultLogger()}, iop: iop}
 		manifestMap, err := h.RenderCharts()
 		if err != nil {
 			t.Fatalf("failed to render manifest: %v", err)
@@ -105,7 +95,7 @@ func applyResourcesIntoCluster(t *testing.T, h *HelmReconciler, manifestMap name
 			if err := h.applyLabelsAndAnnotations(obju, cn); err != nil {
 				t.Errorf("failed to apply label and annotations: %v", err)
 			}
-			if err := h.ApplyObject(obj.UnstructuredObject(), false); err != nil {
+			if err := h.ApplyObject(obj.UnstructuredObject()); err != nil {
 				t.Errorf("HelmReconciler.ApplyObject() error = %v", err)
 			}
 		}

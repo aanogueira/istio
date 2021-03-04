@@ -30,8 +30,8 @@ import (
 
 	"istio.io/istio/istioctl/pkg/clioptions"
 	"istio.io/istio/istioctl/pkg/util/handlers"
+	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/xds"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/kube"
@@ -57,11 +57,12 @@ func waitCmd() *cobra.Command {
 		Use:   "wait [flags] <type> <name>[.<namespace>]",
 		Short: "Wait for an Istio resource",
 		Long:  `Waits for the specified condition to be true of an Istio resource.`,
-		Example: `  # Wait until the bookinfo virtual service has been distributed to all proxies in the mesh
-  istioctl experimental wait --for=distribution virtualservice bookinfo.default
+		Example: `
+# Wait until the bookinfo virtual service has been distributed to all proxies in the mesh
+istioctl experimental wait --for=distribution virtualservice bookinfo.default
 
-  # Wait until 99% of the proxies receive the distribution, timing out after 5 minutes
-  istioctl experimental wait --for=distribution --threshold=.99 --timeout=300 virtualservice bookinfo.default
+# Wait until 99% of the proxies receive the distribution, timing out after 5 minutes
+istioctl experimental wait --for=distribution --threshold=.99 --timeout=300 virtualservice bookinfo.default
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			printVerbosef(cmd, "kubeconfig %s", kubeconfig)
@@ -91,7 +92,7 @@ func waitCmd() *cobra.Command {
 				return fmt.Errorf("unable to retrieve Kubernetes resource %s: %v", "", err)
 			}
 			resourceVersions := []string{firstVersion}
-			targetResource := config.Key(targetSchema.Resource().Kind(), nameflag, namespace)
+			targetResource := model.Key(targetSchema.Resource().Kind(), nameflag, namespace)
 			for {
 				//run the check here as soon as we start
 				// because tickers won't run immediately
@@ -131,13 +132,13 @@ func waitCmd() *cobra.Command {
 		},
 	}
 	cmd.PersistentFlags().StringVar(&forFlag, "for", "distribution",
-		"Wait condition, must be 'distribution' or 'delete'")
+		"wait condition, must be 'distribution' or 'delete'")
 	cmd.PersistentFlags().DurationVar(&timeout, "timeout", time.Second*30,
-		"The duration to wait before failing")
+		"the duration to wait before failing")
 	cmd.PersistentFlags().Float32Var(&threshold, "threshold", 1,
-		"The ratio of distribution required for success")
+		"the ratio of distribution required for success")
 	cmd.PersistentFlags().StringVar(&resourceVersion, "resource-version", "",
-		"Wait for a specific version of config to become current, rather than using whatever is latest in "+
+		"wait for a specific version of config to become current, rather than using whatever is latest in "+
 			"kubernetes")
 	cmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enables verbose output")
 	_ = cmd.PersistentFlags().MarkHidden("verbose")

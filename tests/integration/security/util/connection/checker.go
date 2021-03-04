@@ -1,4 +1,3 @@
-// +build integ
 //  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,10 +18,6 @@ import (
 	"fmt"
 	"time"
 
-	"istio.io/istio/pkg/test/echo/common/scheme"
-
-	"istio.io/istio/pkg/test/framework/resource"
-
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/util/retry"
@@ -31,7 +26,6 @@ import (
 // Checker is a test utility for testing the network connectivity between two endpoints.
 type Checker struct {
 	From          echo.Instance
-	DestClusters  resource.Clusters
 	Options       echo.CallOptions
 	ExpectSuccess bool
 }
@@ -46,13 +40,6 @@ func (c *Checker) Check() error {
 		if err != nil {
 			return fmt.Errorf("%s to %s:%s using %s: expected success but failed: %v",
 				c.From.Config().Service, c.Options.Target.Config().Service, c.Options.PortName, c.Options.Scheme, err)
-		}
-		// TODO: check why grpc can not reach all clusters
-		if c.DestClusters.IsMulticluster() && c.Options.Scheme != scheme.GRPC {
-			err = results.CheckReachedClusters(c.DestClusters)
-			if err != nil {
-				return err
-			}
 		}
 		return nil
 	}

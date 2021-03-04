@@ -22,6 +22,8 @@ import (
 	"time"
 
 	multierror "github.com/hashicorp/go-multierror"
+
+	"istio.io/pkg/env"
 )
 
 const (
@@ -36,7 +38,7 @@ const (
 )
 
 var (
-	readinessTimeout = time.Second * 3 // Default Readiness timeout. It is set the same in helm charts.
+	readinessTimeout = env.RegisterDurationVar("ENVOY_READINESS_CHECK_TIMEOUT", time.Second*5, "").Get()
 )
 
 type stat struct {
@@ -68,7 +70,7 @@ func (s *Stats) String() string {
 
 // GetReadinessStats returns the current Envoy state by checking the "server.state" stat.
 func GetReadinessStats(localHostAddr string, adminPort uint16) (*uint64, bool, error) {
-	// If the localHostAddr was not set, we use 'localhost' to void empty host in URL.
+	// If the localHostAddr was not set, we use 'localhost' to void emppty host in URL.
 	if localHostAddr == "" {
 		localHostAddr = "localhost"
 	}
@@ -100,7 +102,7 @@ func GetReadinessStats(localHostAddr string, adminPort uint16) (*uint64, bool, e
 
 // GetUpdateStatusStats returns the version stats for CDS and LDS.
 func GetUpdateStatusStats(localHostAddr string, adminPort uint16) (*Stats, error) {
-	// If the localHostAddr was not set, we use 'localhost' to void empty host in URL.
+	// If the localHostAddr was not set, we use 'localhost' to void emppty host in URL.
 	if localHostAddr == "" {
 		localHostAddr = "localhost"
 	}

@@ -94,7 +94,7 @@ func endpointServiceInstances(c *Controller, endpoints *v1.Endpoints, proxy *mod
 
 					if hasProxyIP(ss.NotReadyAddresses, ip) {
 						if c.metrics != nil {
-							c.metrics.AddMetric(model.ProxyStatusEndpointNotReady, proxy.ID, proxy.ID, "")
+							c.metrics.AddMetric(model.ProxyStatusEndpointNotReady, proxy.ID, proxy, "")
 						}
 					}
 				}
@@ -105,20 +105,21 @@ func endpointServiceInstances(c *Controller, endpoints *v1.Endpoints, proxy *mod
 	return out
 }
 
-func (e *endpointsController) InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, labelsList labels.Collection) []*model.ServiceInstance {
+func (e *endpointsController) InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int,
+	labelsList labels.Collection) ([]*model.ServiceInstance, error) {
 	item, exists, err := e.informer.GetStore().GetByKey(kube.KeyFunc(svc.Attributes.Name, svc.Attributes.Namespace))
 	if err != nil {
 		log.Infof("get endpoints(%s, %s) => error %v", svc.Attributes.Name, svc.Attributes.Namespace, err)
-		return nil
+		return nil, nil
 	}
 	if !exists {
-		return nil
+		return nil, nil
 	}
 
 	// Locate all ports in the actual service
 	svcPort, exists := svc.Ports.GetByPort(reqSvcPort)
 	if !exists {
-		return nil
+		return nil, nil
 	}
 	ep := item.(*v1.Endpoints)
 	var out []*model.ServiceInstance
@@ -152,7 +153,7 @@ func (e *endpointsController) InstancesByPort(c *Controller, svc *model.Service,
 		}
 	}
 
-	return out
+	return out, nil
 }
 
 func (e *endpointsController) getInformer() cache.SharedIndexInformer {

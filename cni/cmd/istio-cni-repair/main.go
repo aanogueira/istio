@@ -28,7 +28,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"istio.io/istio/cni/pkg/repair"
-	"istio.io/istio/tools/istio-iptables/pkg/constants"
 	"istio.io/pkg/log"
 )
 
@@ -61,7 +60,7 @@ func parseFlags() (filters *repair.Filters, options *ControllerOptions) {
 		"The expected termination message for the init container when crash-looping because of CNI misconfiguration")
 	pflag.Int(
 		"init-container-exit-code",
-		constants.ValidationErrorCode,
+		126,
 		"Expected exit code for the init container when crash-looping because of CNI misconfiguration")
 
 	pflag.String("label-selectors", "", "A set of label selectors in label=value format that will be added to the pod list filters")
@@ -84,7 +83,7 @@ func parseFlags() (filters *repair.Filters, options *ControllerOptions) {
 
 	pflag.Parse()
 	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
-		log.Fatalf("Error parsing command line args: %+v", err)
+		log.Fatal("Error parsing command line args: %+v")
 	}
 
 	if viper.GetBool("help") {

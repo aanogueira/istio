@@ -21,6 +21,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
+	"istio.io/istio/pkg/adsc"
+
+	"istio.io/pkg/log"
+
 	configaggregate "istio.io/istio/pilot/pkg/config/aggregate"
 	"istio.io/istio/pilot/pkg/config/memory"
 	"istio.io/istio/pilot/pkg/model"
@@ -28,10 +32,8 @@ import (
 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
 	controllermemory "istio.io/istio/pilot/pkg/serviceregistry/memory"
 	"istio.io/istio/pilot/pkg/serviceregistry/serviceentry"
-	"istio.io/istio/pkg/adsc"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/pkg/log"
 )
 
 // Server represents the XDS serving feature of Istiod (pilot).
@@ -84,7 +86,7 @@ func NewXDS() *SimpleServer {
 	env.Watcher = mesh.NewFixedWatcher(&mc)
 	env.PushContext.Mesh = env.Watcher.Mesh()
 
-	ds := NewDiscoveryServer(env, nil, "pilot-123")
+	ds := NewDiscoveryServer(env, nil)
 	ds.CachesSynced()
 
 	// Config will have a fixed format:
@@ -105,7 +107,7 @@ func NewXDS() *SimpleServer {
 	s.MemoryConfigStore = model.MakeIstioStore(configController)
 
 	// Endpoints/Clusters - using the config store for ServiceEntries
-	serviceControllers := aggregate.NewController(aggregate.Options{})
+	serviceControllers := aggregate.NewController()
 
 	serviceEntryStore := serviceentry.NewServiceDiscovery(configController, s.MemoryConfigStore, ds)
 	serviceEntryRegistry := serviceregistry.Simple{
@@ -187,19 +189,13 @@ func (p *ProxyGen) AddClient(adsc *adsc.ADSC) {
 	p.server.m.Unlock()
 }
 
-func (p *ProxyGen) Close() {
-	if p.adsc != nil {
-		p.adsc.Close()
-	}
-}
-
 // TODO: remove clients, multiple clients (agent has only one)
 
 // Generate will forward the request to all remote XDS servers.
 // Responses will be forwarded back to the client.
 //
 // TODO: allow clients to indicate which requests they handle ( similar with topic )
-func (p *ProxyGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, req *model.PushRequest) model.Resources {
+func (p *ProxyGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates model.XdsUpdates) model.Resources {
 	if p.adsc == nil {
 		return nil
 	}

@@ -15,12 +15,11 @@
 package virtualservice
 
 import (
-	"fmt"
 	"regexp"
 
 	"istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/galley/pkg/config/analysis"
-	"istio.io/istio/galley/pkg/config/analysis/analyzers/util"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
 	"istio.io/istio/pkg/config/resource"
 	"istio.io/istio/pkg/config/schema/collection"
@@ -55,35 +54,27 @@ func (a *RegexAnalyzer) analyzeVirtualService(r *resource.Instance, ctx analysis
 
 	vs := r.Message.(*v1alpha3.VirtualService)
 
-	for i, route := range vs.GetHttp() {
-		for j, m := range route.GetMatch() {
-
-			analyzeStringMatch(r, m.GetUri(), ctx, "uri",
-				fmt.Sprintf(util.URISchemeMethodAuthorityRegexMatch, i, j, "uri"))
-			analyzeStringMatch(r, m.GetScheme(), ctx, "scheme",
-				fmt.Sprintf(util.URISchemeMethodAuthorityRegexMatch, i, j, "scheme"))
-			analyzeStringMatch(r, m.GetMethod(), ctx, "method",
-				fmt.Sprintf(util.URISchemeMethodAuthorityRegexMatch, i, j, "method"))
-			analyzeStringMatch(r, m.GetAuthority(), ctx, "authority",
-				fmt.Sprintf(util.URISchemeMethodAuthorityRegexMatch, i, j, "authority"))
-			for key, h := range m.GetHeaders() {
-				analyzeStringMatch(r, h, ctx, "headers",
-					fmt.Sprintf(util.HeaderAndQueryParamsRegexMatch, i, j, "headers", key))
+	for _, route := range vs.GetHttp() {
+		for _, m := range route.GetMatch() {
+			analyzeStringMatch(r, m.GetUri(), ctx, "uri")
+			analyzeStringMatch(r, m.GetScheme(), ctx, "scheme")
+			analyzeStringMatch(r, m.GetMethod(), ctx, "method")
+			analyzeStringMatch(r, m.GetAuthority(), ctx, "authority")
+			for _, h := range m.GetHeaders() {
+				analyzeStringMatch(r, h, ctx, "headers")
 			}
-			for key, qp := range m.GetQueryParams() {
-				analyzeStringMatch(r, qp, ctx, "queryParams",
-					fmt.Sprintf(util.HeaderAndQueryParamsRegexMatch, i, j, "queryParams", key))
+			for _, qp := range m.GetQueryParams() {
+				analyzeStringMatch(r, qp, ctx, "queryParams")
 			}
 			// We don't validate withoutHeaders, because they are undocumented
 		}
-		for j, origin := range route.GetCorsPolicy().GetAllowOrigins() {
-			analyzeStringMatch(r, origin, ctx, "corsPolicy.allowOrigins",
-				fmt.Sprintf(util.AllowOriginsRegexMatch, i, j))
+		for _, origin := range route.GetCorsPolicy().GetAllowOrigins() {
+			analyzeStringMatch(r, origin, ctx, "corsPolicy.allowOrigins")
 		}
 	}
 }
 
-func analyzeStringMatch(r *resource.Instance, sm *v1alpha3.StringMatch, ctx analysis.Context, where string, key string) {
+func analyzeStringMatch(r *resource.Instance, sm *v1alpha3.StringMatch, ctx analysis.Context, where string) {
 	re := sm.GetRegex()
 	if re == "" {
 		return
@@ -94,12 +85,6 @@ func analyzeStringMatch(r *resource.Instance, sm *v1alpha3.StringMatch, ctx anal
 		return
 	}
 
-	m := msg.NewInvalidRegexp(r, where, re, err.Error())
-
-	// Get line number for different match field
-	if line, ok := util.ErrorLine(r, key); ok {
-		m.Line = line
-	}
-
-	ctx.Report(collections.IstioNetworkingV1Alpha3Virtualservices.Name(), m)
+	ctx.Report(collections.IstioNetworkingV1Alpha3Virtualservices.Name(),
+		msg.NewInvalidRegexp(r, where, re, err.Error()))
 }

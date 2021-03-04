@@ -121,7 +121,7 @@ transforms:
 
 	for _, c := range cases {
 		t.Run("", func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 
 			actual, err := ParseAndBuild(c.Input)
 			g.Expect(err).To(BeNil())
@@ -259,7 +259,7 @@ transforms:
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g := NewGomegaWithT(t)
 
 			_, err := ParseAndBuild(c.input)
 			g.Expect(err).ToNot(BeNil())
@@ -299,7 +299,7 @@ transforms:
 `
 
 func TestSchemaBasic(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	s, err := ParseAndBuild(input)
 	g.Expect(err).To(BeNil())
@@ -358,7 +358,7 @@ func TestSchemaBasic(t *testing.T) {
 }
 
 func TestSchema_DirectTransform_Panic(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	defer func() {
 		r := recover()
@@ -372,7 +372,7 @@ func TestSchema_DirectTransform_Panic(t *testing.T) {
 }
 
 func TestBuild_UnknownTransform(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	a := &ast.Metadata{
 		TransformSettings: []ast.TransformSettings{

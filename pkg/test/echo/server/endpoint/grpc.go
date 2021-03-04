@@ -26,13 +26,13 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/reflection"
 
 	"istio.io/istio/pkg/test/echo/common"
 	"istio.io/istio/pkg/test/echo/common/response"
 	"istio.io/istio/pkg/test/echo/proto"
 	"istio.io/istio/pkg/test/echo/server/forwarder"
 	"istio.io/istio/pkg/test/util/retry"
+	"istio.io/pkg/log"
 )
 
 var _ Instance = &grpcInstance{}
@@ -46,10 +46,6 @@ func newGRPC(config Config) Instance {
 	return &grpcInstance{
 		Config: config,
 	}
-}
-
-func (s *grpcInstance) GetConfig() Config {
-	return s.Config
 }
 
 func (s *grpcInstance) Start(onReady OnReadyFunc) error {
@@ -66,7 +62,7 @@ func (s *grpcInstance) Start(onReady OnReadyFunc) error {
 		// Create the TLS credentials
 		creds, errCreds := credentials.NewServerTLSFromFile(s.TLSCert, s.TLSKey)
 		if errCreds != nil {
-			epLog.Errorf("could not load TLS keys: %s", errCreds)
+			log.Errorf("could not load TLS keys: %s", errCreds)
 		}
 		s.server = grpc.NewServer(grpc.Creds(creds))
 	} else {
@@ -76,7 +72,6 @@ func (s *grpcInstance) Start(onReady OnReadyFunc) error {
 	proto.RegisterEchoTestServiceServer(s.server, &grpcHandler{
 		Config: s.Config,
 	})
-	reflection.Register(s.server)
 
 	// Start serving GRPC traffic.
 	go func() {
@@ -111,9 +106,9 @@ func (s *grpcInstance) awaitReady(onReady OnReadyFunc, listener net.Listener) {
 		return err
 	}, retry.Timeout(readyTimeout), retry.Delay(readyInterval))
 	if err != nil {
-		epLog.Errorf("readiness failed for GRPC endpoint %s: %v", listener.Addr().String(), err)
+		log.Errorf("readiness failed for GRPC endpoint %s: %v", listener.Addr().String(), err)
 	} else {
-		epLog.Infof("ready for GRPC endpoint %s", listener.Addr().String())
+		log.Infof("ready for GRPC endpoint %s", listener.Addr().String())
 	}
 }
 
@@ -149,7 +144,7 @@ func (h *grpcHandler) Echo(ctx context.Context, req *proto.EchoRequest) (*proto.
 		}
 	}
 
-	epLog.Infof("GRPC Request:\n  Host: %s\n  Message: %s\n  Headers: %v\n", host, req.GetMessage(), md)
+	log.Infof("GRPC Request:\n  Host: %s\n  Message: %s\n  Headers: %v\n", host, req.GetMessage(), md)
 
 	portNumber := 0
 	if h.Port != nil {
@@ -170,7 +165,7 @@ func (h *grpcHandler) Echo(ctx context.Context, req *proto.EchoRequest) (*proto.
 }
 
 func (h *grpcHandler) ForwardEcho(ctx context.Context, req *proto.ForwardEchoRequest) (*proto.ForwardEchoResponse, error) {
-	epLog.Infof("ForwardEcho[%s] request", req.Url)
+	log.Infof("ForwardEcho[%s] request", req.Url)
 	instance, err := forwarder.New(forwarder.Config{
 		Request: req,
 		Dialer:  h.Dialer,
@@ -179,9 +174,8 @@ func (h *grpcHandler) ForwardEcho(ctx context.Context, req *proto.ForwardEchoReq
 	if err != nil {
 		return nil, err
 	}
-	defer instance.Close()
 
 	ret, err := instance.Run(ctx)
-	epLog.Infof("ForwardEcho[%s] response: %v and error %v", req.Url, ret.GetOutput(), err)
+	log.Infof("ForwardEcho[%s] response: %v and error %v", req.Url, ret.GetOutput(), err)
 	return ret, err
 }

@@ -36,7 +36,8 @@ type kubeEndpointsController interface {
 	Run(stopCh <-chan struct{})
 	getInformer() cache.SharedIndexInformer
 	onEvent(curr interface{}, event model.Event) error
-	InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, labelsList labels.Collection) []*model.ServiceInstance
+	InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int,
+		labelsList labels.Collection) ([]*model.ServiceInstance, error)
 	GetProxyServiceInstances(c *Controller, proxy *model.Proxy) []*model.ServiceInstance
 	buildIstioEndpoints(ep interface{}, host host.Name) []*model.IstioEndpoint
 	buildIstioEndpointsWithService(name, namespace string, host host.Name) []*model.IstioEndpoint
@@ -68,13 +69,12 @@ func processEndpointEvent(c *Controller, epc kubeEndpointsController, name strin
 		if svc, _ := c.serviceLister.Services(namespace).Get(name); svc != nil {
 			// if the service is headless service, trigger a full push.
 			if svc.Spec.ClusterIP == v1.ClusterIPNone {
-				hostname := kube.ServiceHostname(svc.Name, svc.Namespace, c.domainSuffix)
 				c.xdsUpdater.ConfigUpdate(&model.PushRequest{
 					Full: true,
 					// TODO: extend and set service instance type, so no need to re-init push context
 					ConfigsUpdated: map[model.ConfigKey]struct{}{{
 						Kind:      gvk.ServiceEntry,
-						Name:      string(hostname),
+						Name:      string(kube.ServiceHostname(svc.Name, svc.Namespace, c.domainSuffix)),
 						Namespace: svc.Namespace,
 					}: {}},
 					Reason: []model.TriggerReason{model.EndpointUpdate},
@@ -83,12 +83,15 @@ func processEndpointEvent(c *Controller, epc kubeEndpointsController, name strin
 			}
 		}
 	}
-
 	return nil
 }
 
 func updateEDS(c *Controller, epc kubeEndpointsController, ep interface{}, event model.Event) {
 	host, svcName, ns := epc.getServiceInfo(ep)
+	c.RLock()
+	svc := c.servicesMap[host]
+	c.RUnlock()
+
 	log.Debugf("Handle EDS endpoint %s in namespace %s", svcName, ns)
 	var endpoints []*model.IstioEndpoint
 	if event == model.EventDelete {
@@ -97,20 +100,11 @@ func updateEDS(c *Controller, epc kubeEndpointsController, ep interface{}, event
 		endpoints = epc.buildIstioEndpoints(ep, host)
 	}
 
-	// handling k8s service selecting workload entries
-	if features.EnableK8SServiceSelectWorkloadEntries {
-		c.RLock()
-		svc := c.servicesMap[host]
-		c.RUnlock()
-		if svc != nil {
-			fep := c.collectWorkloadInstanceEndpoints(svc)
-			endpoints = append(endpoints, fep...)
-		} else {
-			log.Infof("Handle EDS endpoint: skip collecting workload entry endpoints, service %s/%s has not been populated", svcName, ns)
-		}
+	if features.EnableK8SServiceSelectWorkloadEntries && svc != nil {
+		fep := c.collectWorkloadInstanceEndpoints(svc)
+		endpoints = append(endpoints, fep...)
 	}
-
-	c.xdsUpdater.EDSUpdate(c.clusterID, string(host), ns, endpoints)
+	_ = c.xdsUpdater.EDSUpdate(c.clusterID, string(host), ns, endpoints)
 }
 
 // getPod fetches a pod by IP address.
@@ -136,7 +130,7 @@ func getPod(c *Controller, ip string, ep *metav1.ObjectMeta, targetRef *v1.Objec
 			log.Debugf("Endpoint without pod %s %s.%s error: %v", ip, ep.Name, ep.Namespace, err)
 			endpointsWithNoPods.Increment()
 			if c.metrics != nil {
-				c.metrics.AddMetric(model.EndpointNoPod, string(host), "", ip)
+				c.metrics.AddMetric(model.EndpointNoPod, string(host), nil, ip)
 			}
 			// Tell pod cache we want to queue the endpoint event when this pod arrives.
 			epkey := kube.KeyFunc(ep.Name, ep.Namespace)

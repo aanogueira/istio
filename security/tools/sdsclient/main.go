@@ -20,10 +20,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"istio.io/pkg/version"
+
 	"istio.io/istio/pkg/cmd"
 	"istio.io/istio/security/pkg/testing/sdsc"
 	"istio.io/pkg/env"
-	"istio.io/pkg/version"
 )
 
 var (

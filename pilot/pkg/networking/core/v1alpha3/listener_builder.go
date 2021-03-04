@@ -20,13 +20,14 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
-	envoytype "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	wellknown "github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	golangproto "github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/wrappers"
 
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/pkg/log"
+
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	istionetworking "istio.io/istio/pilot/pkg/networking"
@@ -37,7 +38,6 @@ import (
 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/proto"
-	"istio.io/pkg/log"
 )
 
 var (
@@ -64,14 +64,14 @@ type ListenerBuilder struct {
 	httpProxyListener       *listener.Listener
 	virtualOutboundListener *listener.Listener
 	virtualInboundListener  *listener.Listener
-
-	envoyFilterWrapper *model.EnvoyFilterWrapper
+	// UDP listener for local dns resolution in Envoy
+	dnsListener *listener.Listener
 }
 
 // Setup the filter chain match so that the match should work under both
 // - bind_to_port == false listener
 // - virtual inbound listener
-func amendFilterChainMatchFromInboundListener(chain *listener.FilterChain, l *listener.Listener) enabledInspector {
+func amendFilterChainMatchFromInboundListener(chain *listener.FilterChain, l *listener.Listener, needTLS bool) (*listener.FilterChain, bool) {
 	if chain.FilterChainMatch == nil {
 		chain.FilterChainMatch = &listener.FilterChainMatch{}
 	}
@@ -89,17 +89,12 @@ func amendFilterChainMatchFromInboundListener(chain *listener.FilterChain, l *li
 		}
 		chain.Name = l.Name
 	}
-
-	res := enabledInspector{}
 	for _, filter := range l.ListenerFilters {
-		if filter.Name == wellknown.TlsInspector {
-			res.TLSInspector = true
-		}
-		if filter.Name == wellknown.HttpInspector {
-			res.HTTPInspector = true
+		if needTLS = needTLS || filter.Name == wellknown.TlsInspector; needTLS {
+			break
 		}
 	}
-	return res
+	return chain, needTLS
 }
 
 func isBindtoPort(l *listener.Listener) bool {
@@ -116,15 +111,9 @@ func isBindtoPort(l *listener.Listener) bool {
 	return bp.Value
 }
 
-// enabledInspector captures if for a given listener, listener filter inspectors are added
-type enabledInspector struct {
-	HTTPInspector bool
-	TLSInspector  bool
-}
-
 // Accumulate the filter chains from per proxy service listeners
-func reduceInboundListenerToFilterChains(listeners []*listener.Listener) ([]*listener.FilterChain, map[int]enabledInspector) {
-	inspectorsMap := map[int]enabledInspector{}
+func reduceInboundListenerToFilterChains(listeners []*listener.Listener) ([]*listener.FilterChain, bool) {
+	needTLS := false
 	chains := make([]*listener.FilterChain, 0)
 	for _, l := range listeners {
 		// default bindToPort is true and these listener should be skipped
@@ -133,30 +122,12 @@ func reduceInboundListenerToFilterChains(listeners []*listener.Listener) ([]*lis
 			continue
 		}
 		for _, c := range l.FilterChains {
-			chain := golangproto.Clone(c).(*listener.FilterChain)
-			inspectors := amendFilterChainMatchFromInboundListener(chain, l)
-			chains = append(chains, chain)
-			// Aggregate the inspector options. If any listener on the port needs inspector, we should add it
-			// Generally there is 1 listener per port anyways.
-			port := int(l.Address.GetSocketAddress().GetPortValue())
-			if port > 0 {
-				prev := inspectorsMap[port]
-				prev.HTTPInspector = prev.HTTPInspector || inspectors.HTTPInspector
-				prev.TLSInspector = prev.TLSInspector || inspectors.TLSInspector
-				inspectorsMap[port] = prev
-			}
+			newChain, needTLSLocal := amendFilterChainMatchFromInboundListener(golangproto.Clone(c).(*listener.FilterChain), l, needTLS)
+			chains = append(chains, newChain)
+			needTLS = needTLS || needTLSLocal
 		}
 	}
-	return chains, inspectorsMap
-}
-
-func needsTLS(inspectors map[int]enabledInspector) bool {
-	for _, i := range inspectors {
-		if i.TLSInspector {
-			return true
-		}
-	}
-	return false
+	return chains, needTLS
 }
 
 func (lb *ListenerBuilder) aggregateVirtualInboundListener(needTLSForPassThroughFilterChain bool) *ListenerBuilder {
@@ -171,7 +142,7 @@ func (lb *ListenerBuilder) aggregateVirtualInboundListener(needTLSForPassThrough
 	)
 	// TODO: Trim the inboundListeners properly. Those that have been added to filter chains should
 	// be removed while those that haven't been added need to remain in the inboundListeners list.
-	filterChains, inspectors := reduceInboundListenerToFilterChains(lb.inboundListeners)
+	filterChains, needTLS := reduceInboundListenerToFilterChains(lb.inboundListeners)
 	sort.SliceStable(filterChains, func(i, j int) bool {
 		return filterChains[i].Name < filterChains[j].Name
 	})
@@ -179,9 +150,9 @@ func (lb *ListenerBuilder) aggregateVirtualInboundListener(needTLSForPassThrough
 	lb.virtualInboundListener.FilterChains =
 		append(lb.virtualInboundListener.FilterChains, filterChains...)
 
-	if needsTLS(inspectors) || needTLSForPassThroughFilterChain {
+	if needTLS || needTLSForPassThroughFilterChain {
 		lb.virtualInboundListener.ListenerFilters =
-			append(lb.virtualInboundListener.ListenerFilters, buildTLSInspector(inspectors))
+			append(lb.virtualInboundListener.ListenerFilters, xdsfilters.TLSInspector)
 	}
 
 	if lb.node.GetInterceptionMode() == model.InterceptionTproxy {
@@ -194,14 +165,11 @@ func (lb *ListenerBuilder) aggregateVirtualInboundListener(needTLSForPassThrough
 	// won't inspect the packet.
 	if features.EnableProtocolSniffingForInbound {
 		lb.virtualInboundListener.ListenerFilters =
-			append(lb.virtualInboundListener.ListenerFilters, buildHTTPInspector(inspectors))
+			append(lb.virtualInboundListener.ListenerFilters, xdsfilters.HTTPInspector)
 	}
 
-	timeout := util.GogoDurationToDuration(lb.push.Mesh.GetProtocolDetectionTimeout())
-	if features.InboundProtocolDetectionTimeoutSet {
-		timeout = ptypes.DurationProto(features.InboundProtocolDetectionTimeout)
-	}
-	lb.virtualInboundListener.ListenerFiltersTimeout = timeout
+	timeout := features.InboundProtocolDetectionTimeout
+	lb.virtualInboundListener.ListenerFiltersTimeout = ptypes.DurationProto(timeout)
 	lb.virtualInboundListener.ContinueOnListenerFiltersTimeout = true
 
 	// All listeners except bind_to_port=true listeners are now a part of virtual inbound and not needed
@@ -215,79 +183,6 @@ func (lb *ListenerBuilder) aggregateVirtualInboundListener(needTLSForPassThrough
 	lb.inboundListeners = bindToPortInbound
 
 	return lb
-}
-
-// buildTLSInspector creates a tls inspector filter. Based on the configured ports, this may be enabled
-// for only some ports.
-func buildTLSInspector(inspectors map[int]enabledInspector) *listener.ListenerFilter {
-	ports := make([]int, 0, len(inspectors))
-	// Collect all ports where TLS inspector is disabled.
-	for p, i := range inspectors {
-		if !i.TLSInspector {
-			ports = append(ports, p)
-		}
-	}
-	// No need to filter, return the cached version enabled for all ports
-	if len(ports) == 0 {
-		return xdsfilters.TLSInspector
-	}
-	// Ensure consistent ordering as we are looping over a map
-	sort.Ints(ports)
-	filter := &listener.ListenerFilter{
-		Name:           wellknown.TlsInspector,
-		ConfigType:     xdsfilters.TLSInspector.ConfigType,
-		FilterDisabled: listenerPredicateExcludePorts(ports),
-	}
-	return filter
-}
-
-// buildHTTPInspector creates an http inspector filter. Based on the configured ports, this may be enabled
-// for only some ports.
-func buildHTTPInspector(inspectors map[int]enabledInspector) *listener.ListenerFilter {
-	ports := make([]int, 0, len(inspectors))
-	// Collect all ports where HTTP inspector is disabled.
-	for p, i := range inspectors {
-		if !i.HTTPInspector {
-			ports = append(ports, p)
-		}
-	}
-	// No need to filter, return the cached version enabled for all ports
-	if len(ports) == 0 {
-		return xdsfilters.HTTPInspector
-	}
-	// Ensure consistent ordering as we are looping over a map
-	sort.Ints(ports)
-	filter := &listener.ListenerFilter{
-		Name:           wellknown.HttpInspector,
-		ConfigType:     xdsfilters.HTTPInspector.ConfigType,
-		FilterDisabled: listenerPredicateExcludePorts(ports),
-	}
-	return filter
-}
-
-// listenerPredicateExcludePorts returns a listener filter predicate that will
-// match everything except the passed in ports. This is useful, for example, to
-// enable protocol sniffing on every port except port X and Y, because X and Y
-// are explicitly declared.
-func listenerPredicateExcludePorts(ports []int) *listener.ListenerFilterChainMatchPredicate {
-	ranges := []*listener.ListenerFilterChainMatchPredicate{}
-	for _, p := range ports {
-		ranges = append(ranges, &listener.ListenerFilterChainMatchPredicate{Rule: &listener.ListenerFilterChainMatchPredicate_DestinationPortRange{
-			// Range is [start, end)
-			DestinationPortRange: &envoytype.Int32Range{
-				Start: int32(p),
-				End:   int32(p + 1),
-			},
-		}})
-	}
-	if len(ranges) > 1 {
-		return &listener.ListenerFilterChainMatchPredicate{Rule: &listener.ListenerFilterChainMatchPredicate_OrMatch{
-			OrMatch: &listener.ListenerFilterChainMatchPredicate_MatchSet{
-				Rules: ranges,
-			},
-		}}
-	}
-	return &listener.ListenerFilterChainMatchPredicate{Rule: ranges[0].GetRule()}
 }
 
 func NewListenerBuilder(node *model.Proxy, push *model.PushContext) *ListenerBuilder {
@@ -305,6 +200,11 @@ func (lb *ListenerBuilder) buildSidecarInboundListeners(configgen *ConfigGenerat
 
 func (lb *ListenerBuilder) buildSidecarOutboundListeners(configgen *ConfigGeneratorImpl) *ListenerBuilder {
 	lb.outboundListeners = configgen.buildSidecarOutboundListeners(lb.node, lb.push)
+	return lb
+}
+
+func (lb *ListenerBuilder) buildSidecarDNSListener(configgen *ConfigGeneratorImpl) *ListenerBuilder {
+	lb.dnsListener = configgen.buildSidecarDNSListener(lb.node, lb.push)
 	return lb
 }
 
@@ -339,7 +239,7 @@ func (lb *ListenerBuilder) buildVirtualOutboundListener(configgen *ConfigGenerat
 		FilterChains:                        filterChains,
 		TrafficDirection:                    core.TrafficDirection_OUTBOUND,
 	}
-	accessLogBuilder.setListenerAccessLog(lb.push.Mesh, ipTablesListener)
+	configgen.onVirtualOutboundListener(lb.node, lb.push, ipTablesListener)
 	lb.virtualOutboundListener = ipTablesListener
 	return lb
 }
@@ -366,7 +266,6 @@ func (lb *ListenerBuilder) buildVirtualInboundListener(configgen *ConfigGenerato
 		TrafficDirection:                    core.TrafficDirection_INBOUND,
 		FilterChains:                        filterChains,
 	}
-	accessLogBuilder.setListenerAccessLog(lb.push.Mesh, lb.virtualInboundListener)
 	lb.aggregateVirtualInboundListener(needTLSForPassThroughFilterChain)
 
 	return lb
@@ -377,38 +276,32 @@ func (lb *ListenerBuilder) patchOneListener(l *listener.Listener, ctx networking
 		return nil
 	}
 	tempArray := []*listener.Listener{l}
-	tempArray = envoyfilter.ApplyListenerPatches(ctx, lb.node, lb.push, lb.envoyFilterWrapper, tempArray, true)
+	tempArray = envoyfilter.ApplyListenerPatches(ctx, lb.node, lb.push, tempArray, true)
 	// temp array will either be empty [if virtual listener was removed] or will have a modified listener
 	if len(tempArray) == 0 {
 		return nil
 	}
 	return tempArray[0]
 }
-
 func (lb *ListenerBuilder) patchListeners() {
-	lb.envoyFilterWrapper = lb.push.EnvoyFilters(lb.node)
-	if lb.envoyFilterWrapper == nil {
-		return
-	}
-
 	if lb.node.Type == model.Router {
-		lb.gatewayListeners = envoyfilter.ApplyListenerPatches(networking.EnvoyFilter_GATEWAY, lb.node, lb.push, lb.envoyFilterWrapper,
-			lb.gatewayListeners, false)
+		lb.gatewayListeners = envoyfilter.ApplyListenerPatches(networking.EnvoyFilter_GATEWAY, lb.node, lb.push, lb.gatewayListeners, false)
 		return
 	}
 
 	lb.virtualOutboundListener = lb.patchOneListener(lb.virtualOutboundListener, networking.EnvoyFilter_SIDECAR_OUTBOUND)
+	lb.dnsListener = lb.patchOneListener(lb.dnsListener, networking.EnvoyFilter_SIDECAR_OUTBOUND)
 	lb.virtualInboundListener = lb.patchOneListener(lb.virtualInboundListener, networking.EnvoyFilter_SIDECAR_INBOUND)
 	lb.inboundListeners = envoyfilter.ApplyListenerPatches(networking.EnvoyFilter_SIDECAR_INBOUND, lb.node,
-		lb.push, lb.envoyFilterWrapper, lb.inboundListeners, false)
+		lb.push, lb.inboundListeners, false)
 	lb.outboundListeners = envoyfilter.ApplyListenerPatches(networking.EnvoyFilter_SIDECAR_OUTBOUND, lb.node,
-		lb.push, lb.envoyFilterWrapper, lb.outboundListeners, false)
+		lb.push, lb.outboundListeners, false)
 }
 
 func (lb *ListenerBuilder) getListeners() []*listener.Listener {
 	if lb.node.Type == model.SidecarProxy {
 		nInbound, nOutbound := len(lb.inboundListeners), len(lb.outboundListeners)
-		nHTTPProxy, nVirtual, nVirtualInbound := 0, 0, 0
+		nHTTPProxy, nVirtual, nVirtualInbound, nDNS := 0, 0, 0, 0
 		if lb.httpProxyListener != nil {
 			nHTTPProxy = 1
 		}
@@ -418,8 +311,11 @@ func (lb *ListenerBuilder) getListeners() []*listener.Listener {
 		if lb.virtualInboundListener != nil {
 			nVirtualInbound = 1
 		}
+		if lb.dnsListener != nil {
+			nDNS = 1
+		}
 
-		nListener := nInbound + nOutbound + nHTTPProxy + nVirtual + nVirtualInbound
+		nListener := nInbound + nOutbound + nHTTPProxy + nVirtual + nVirtualInbound + nDNS
 
 		listeners := make([]*listener.Listener, 0, nListener)
 		listeners = append(listeners, lb.inboundListeners...)
@@ -433,15 +329,19 @@ func (lb *ListenerBuilder) getListeners() []*listener.Listener {
 		if lb.virtualInboundListener != nil {
 			listeners = append(listeners, lb.virtualInboundListener)
 		}
+		if lb.dnsListener != nil {
+			listeners = append(listeners, lb.dnsListener)
+		}
 
 		log.Debugf("Build %d listeners for node %s including %d outbound, %d http proxy, "+
-			"%d virtual outbound and %d virtual inbound listeners",
+			"%d virtual outbound and %d virtual inbound listeners, and %d DNS listener",
 			nListener,
 			lb.node.ID,
 			nOutbound,
 			nHTTPProxy,
 			nVirtual,
-			nVirtualInbound)
+			nVirtualInbound,
+			nDNS)
 		return listeners
 	}
 
@@ -492,7 +392,7 @@ func buildInboundCatchAllNetworkFilterChains(configgen *ConfigGeneratorImpl,
 			matchingIP = "::0/0"
 		}
 
-		accessLogBuilder.setTCPAccessLog(push.Mesh, tcpProxy)
+		setAccessLog(push, tcpProxy)
 		tcpProxyFilter := &listener.Filter{
 			Name:       wellknown.TCPProxy,
 			ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(tcpProxy)},
@@ -543,14 +443,12 @@ func buildInboundCatchAllNetworkFilterChains(configgen *ConfigGeneratorImpl,
 				Filters:          append(chain.TCP, tcpProxyFilter),
 			}
 			if chain.TLSContext != nil {
-				filterChain.FilterChainMatch.TransportProtocol = xdsfilters.TLSTransportProtocol
+				filterChain.FilterChainMatch.TransportProtocol = "tls"
 				// Update transport socket from the TLS context configured by the plugin.
 				filterChain.TransportSocket = &core.TransportSocket{
 					Name:       util.EnvoyTLSSocketName,
 					ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: util.MessageToAny(chain.TLSContext)},
 				}
-			} else {
-				filterChain.FilterChainMatch.TransportProtocol = xdsfilters.RawBufferTransportProtocol
 			}
 			for _, filter := range chain.ListenerFilters {
 				if filter.Name == wellknown.TlsInspector {
@@ -566,7 +464,8 @@ func buildInboundCatchAllNetworkFilterChains(configgen *ConfigGeneratorImpl,
 	return filterChains, needTLS
 }
 
-func buildInboundCatchAllHTTPFilterChains(configgen *ConfigGeneratorImpl, node *model.Proxy, push *model.PushContext) []*listener.FilterChain {
+func buildInboundCatchAllHTTPFilterChains(configgen *ConfigGeneratorImpl,
+	node *model.Proxy, push *model.PushContext) []*listener.FilterChain {
 	// ipv4 and ipv6 feature detect
 	ipVersions := make([]string, 0, 2)
 	if node.SupportsIPv4() {
@@ -592,10 +491,13 @@ func buildInboundCatchAllHTTPFilterChains(configgen *ConfigGeneratorImpl, node *
 		}
 
 		in := &plugin.InputParams{
-			ListenerProtocol: istionetworking.ListenerProtocolHTTP,
-			Node:             node,
-			ServiceInstance:  dummyServiceInstance,
-			Push:             push,
+			ListenerProtocol:   istionetworking.ListenerProtocolHTTP,
+			Node:               node,
+			ServiceInstance:    dummyServiceInstance,
+			Port:               port,
+			Push:               push,
+			Bind:               matchingIP,
+			InboundClusterName: clusterName,
 		}
 		// Call plugins to install authn/authz policies.
 		var allChains []istionetworking.FilterChain
@@ -630,17 +532,11 @@ func buildInboundCatchAllHTTPFilterChains(configgen *ConfigGeneratorImpl, node *
 			}
 		}
 
-		listenerOpts := buildListenerOpts{
-			push:  push,
-			proxy: node,
-			bind:  matchingIP,
-			port:  port,
-		}
 		// Construct the actual filter chains for each of the filter chain from the plugin.
 		for _, chain := range allChains {
-			httpOpts := configgen.buildSidecarInboundHTTPListenerOptsForPortOrUDS(node, in, clusterName)
+			httpOpts := configgen.buildSidecarInboundHTTPListenerOptsForPortOrUDS(node, in)
 			httpOpts.statPrefix = clusterName
-			connectionManager := buildHTTPConnectionManager(listenerOpts, httpOpts, chain.HTTP)
+			connectionManager := buildHTTPConnectionManager(in, httpOpts, chain.HTTP)
 
 			filter := &listener.Filter{
 				Name:       wellknown.HTTPConnectionManager,
@@ -652,7 +548,7 @@ func buildInboundCatchAllHTTPFilterChains(configgen *ConfigGeneratorImpl, node *
 				Filters:          []*listener.Filter{filter},
 			}
 			if chain.TLSContext != nil {
-				filterChain.FilterChainMatch.TransportProtocol = xdsfilters.TLSTransportProtocol
+				filterChain.FilterChainMatch.TransportProtocol = "tls"
 				filterChain.FilterChainMatch.ApplicationProtocols =
 					append(filterChain.FilterChainMatch.ApplicationProtocols, mtlsHTTPALPNs...)
 
@@ -661,8 +557,6 @@ func buildInboundCatchAllHTTPFilterChains(configgen *ConfigGeneratorImpl, node *
 					Name:       util.EnvoyTLSSocketName,
 					ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: util.MessageToAny(chain.TLSContext)},
 				}
-			} else {
-				filterChain.FilterChainMatch.TransportProtocol = xdsfilters.RawBufferTransportProtocol
 			}
 			filterChain.Name = virtualInboundCatchAllHTTPFilterChainName
 			filterChains = append(filterChains, filterChain)
@@ -696,7 +590,7 @@ func buildOutboundCatchAllNetworkFiltersOnly(push *model.PushContext, node *mode
 		StatPrefix:       egressCluster,
 		ClusterSpecifier: &tcp.TcpProxy_Cluster{Cluster: egressCluster},
 	}
-	accessLogBuilder.setTCPAccessLog(push.Mesh, tcpProxy)
+	setAccessLog(push, tcpProxy)
 	filterStack = append(filterStack, &listener.Filter{
 		Name:       wellknown.TCPProxy,
 		ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(tcpProxy)},

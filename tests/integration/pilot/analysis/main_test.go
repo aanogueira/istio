@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +19,6 @@ import (
 
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/istio"
-	"istio.io/istio/pkg/test/framework/resource"
 )
 
 // TestMain defines the entrypoint for pilot tests using a standard Istio installation.
@@ -30,7 +28,7 @@ func TestMain(m *testing.M) {
 	framework.
 		NewSuite(m).
 		RequireSingleCluster().
-		Setup(istio.Setup(nil, func(_ resource.Context, cfg *istio.Config) {
+		Setup(istio.Setup(nil, func(cfg *istio.Config) {
 			cfg.ControlPlaneValues = `
 values:
   pilot:

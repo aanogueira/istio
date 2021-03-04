@@ -22,13 +22,12 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/atomic"
-
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/pkg/monitoring"
+
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/util/sets"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/labels"
@@ -36,7 +35,6 @@ import (
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/visibility"
-	"istio.io/pkg/monitoring"
 )
 
 var (
@@ -46,104 +44,10 @@ var (
 // Metrics is an interface for capturing metrics on a per-node basis.
 type Metrics interface {
 	// AddMetric will add an case to the metric for the given node.
-	AddMetric(metric monitoring.Metric, key string, proxyID, msg string)
+	AddMetric(metric monitoring.Metric, key string, proxy *Proxy, msg string)
 }
 
 var _ Metrics = &PushContext{}
-
-// serviceIndex is an index of all services by various fields for easy access during push.
-type serviceIndex struct {
-	// privateServices are reachable within the same namespace, with exportTo "."
-	privateByNamespace map[string][]*Service
-	// public are services reachable within the mesh with exportTo "*"
-	public []*Service
-	// exportedToNamespace are services that were made visible to this namespace
-	// by an exportTo explicitly specifying this namespace.
-	exportedToNamespace map[string][]*Service
-
-	// HostnameAndNamespace has all services, indexed by hostname then namespace.
-	HostnameAndNamespace map[host.Name]map[string]*Service `json:"-"`
-	Hostname             map[host.Name]*Service            `json:"-"`
-
-	// ClusterVIPs contains a map of service and its cluster addresses. It is stored here
-	// to avoid locking each service for every proxy during push.
-	ClusterVIPs map[*Service]map[string]string
-
-	// instancesByPort contains a map of service and instances by port. It is stored here
-	// to avoid recomputations during push. This caches instanceByPort calls with empty labels.
-	// Call InstancesByPort directly when instances need to be filtered by actual labels.
-	instancesByPort map[*Service]map[int][]*ServiceInstance
-}
-
-func newServiceIndex() serviceIndex {
-	return serviceIndex{
-		public:               []*Service{},
-		privateByNamespace:   map[string][]*Service{},
-		exportedToNamespace:  map[string][]*Service{},
-		HostnameAndNamespace: map[host.Name]map[string]*Service{},
-		Hostname:             map[host.Name]*Service{},
-		ClusterVIPs:          map[*Service]map[string]string{},
-		instancesByPort:      map[*Service]map[int][]*ServiceInstance{},
-	}
-}
-
-// exportToDefaults contains the default exportTo values.
-type exportToDefaults struct {
-	service         map[visibility.Instance]bool
-	virtualService  map[visibility.Instance]bool
-	destinationRule map[visibility.Instance]bool
-}
-
-// virtualServiceIndex is the index of virtual services by various fields.
-type virtualServiceIndex struct {
-	exportedToNamespaceByGateway map[string]map[string][]config.Config
-	// this contains all the virtual services with exportTo "." and current namespace. The keys are namespace,gateway.
-	privateByNamespaceAndGateway map[string]map[string][]config.Config
-	// This contains all virtual services whose exportTo is "*", keyed by gateway
-	publicByGateway map[string][]config.Config
-	// root vs namespace/name ->delegate vs virtualservice gvk/namespace/name
-	delegates map[ConfigKey][]ConfigKey
-}
-
-func newVirtualServiceIndex() virtualServiceIndex {
-	return virtualServiceIndex{
-		publicByGateway:              map[string][]config.Config{},
-		privateByNamespaceAndGateway: map[string]map[string][]config.Config{},
-		exportedToNamespaceByGateway: map[string]map[string][]config.Config{},
-		delegates:                    map[ConfigKey][]ConfigKey{},
-	}
-}
-
-// destinationRuleIndex is the index of destination rules by various fields.
-type destinationRuleIndex struct {
-	//  namespaceLocal contains all public/private dest rules pertaining to a service defined in a given namespace.
-	namespaceLocal map[string]*processedDestRules
-	//  exportedByNamespace contains all dest rules pertaining to a service exported by a namespace.
-	exportedByNamespace map[string]*processedDestRules
-	rootNamespaceLocal  *processedDestRules
-}
-
-func newDestinationRuleIndex() destinationRuleIndex {
-	return destinationRuleIndex{
-		namespaceLocal:      map[string]*processedDestRules{},
-		exportedByNamespace: map[string]*processedDestRules{},
-	}
-}
-
-// gatewayIndex is the index of gateways by various fields.
-type gatewayIndex struct {
-	// namespace contains gateways by namespace.
-	namespace map[string][]config.Config
-	// all contains all gateways.
-	all []config.Config
-}
-
-func newGatewayIndex() gatewayIndex {
-	return gatewayIndex{
-		namespace: map[string][]config.Config{},
-		all:       []config.Config{},
-	}
-}
 
 // PushContext tracks the status of a push - metrics and errors.
 // Metrics are reset after a push - at the beginning all
@@ -156,32 +60,65 @@ type PushContext struct {
 	// by the ID.
 	ProxyStatus map[string]map[string]ProxyPushStatus
 
+	// Mutex is used to protect the below store.
+	// All data is set when the PushContext object is populated in `InitContext`,
+	// data should not be changed by plugins.
+	Mutex sync.Mutex `json:"-"`
+
 	// Synthesized from env.Mesh
-	exportToDefaults exportToDefaults
+	defaultServiceExportTo         map[visibility.Instance]bool
+	defaultVirtualServiceExportTo  map[visibility.Instance]bool
+	defaultDestinationRuleExportTo map[visibility.Instance]bool
 
-	// ServiceIndex is the index of services by various fields.
-	ServiceIndex serviceIndex
+	// Service related
+	// TODO: move to a sub struct
 
+	// privateServices are reachable within the same namespace, with exportTo "."
+	privateServicesByNamespace map[string][]*Service
+	// publicServices are services reachable within the mesh with exportTo "*"
+	publicServices []*Service
+	// servicesExportedToNamespace are services that were made visible to this namespace
+	// by an exportTo explicitly specifying this namespace.
+	servicesExportedToNamespace map[string][]*Service
+
+	// ServiceByHostnameAndNamespace has all services, indexed by hostname then namespace.
+	ServiceByHostnameAndNamespace map[host.Name]map[string]*Service `json:"-"`
+	ServiceByHostname             map[host.Name]*Service            `json:"-"`
 	// ServiceAccounts contains a map of hostname and port to service accounts.
 	ServiceAccounts map[host.Name]map[int][]string `json:"-"`
+	// QuotaSpec has all quota specs
+	QuotaSpec []Config `json:"-"`
+	// QuotaSpecBindings has all quota bindings
+	QuotaSpecBinding []Config `json:"-"`
 
-	// virtualServiceIndex is the index of virtual services by various fields.
-	virtualServiceIndex virtualServiceIndex
+	// VirtualService related
+	// This contains all virtual services visible to this namespace extracted from
+	// exportTos that explicitly contained this namespace. The keys are namespace,gateway.
+	virtualServicesExportedToNamespaceByGateway map[string]map[string][]Config
+	// this contains all the virtual services with exportTo "." and current namespace. The keys are namespace,gateway.
+	privateVirtualServicesByNamespaceAndGateway map[string]map[string][]Config
+	// This contains all virtual services whose exportTo is "*", keyed by gateway
+	publicVirtualServicesByGateway map[string][]Config
+	// root vs namespace/name ->delegate vs virtualservice gvk/namespace/name
+	delegateVirtualServices map[ConfigKey][]ConfigKey
 
-	// destinationRuleIndex is the index of destination rules by various fields.
-	destinationRuleIndex destinationRuleIndex
-
-	// gatewayIndex is the index of gateways.
-	gatewayIndex gatewayIndex
+	// destination rules are of three types:
+	//  namespaceLocalDestRules: all public/private dest rules pertaining to a service defined in a given namespace
+	//  exportedDestRulesByNamespace: all dest rules pertaining to a service exported by a namespace
+	namespaceLocalDestRules      map[string]*processedDestRules
+	exportedDestRulesByNamespace map[string]*processedDestRules
 
 	// clusterLocalHosts extracted from the MeshConfig
 	clusterLocalHosts host.Names
 
 	// sidecars for each namespace
 	sidecarsByNamespace map[string][]*SidecarScope
-
 	// envoy filters for each namespace including global config namespace
 	envoyFiltersByNamespace map[string][]*EnvoyFilterWrapper
+	// gateways for each namespace
+	gatewaysByNamespace map[string][]Config
+	allGateways         []Config
+	////////// END ////////
 
 	// The following data is either a global index or used in the inbound path.
 	// Namespace specific views do not apply here.
@@ -194,7 +131,7 @@ type PushContext struct {
 	Mesh *meshconfig.MeshConfig `json:"-"`
 
 	// Networks configuration.
-	MeshNetworks *meshconfig.MeshNetworks `json:"-"`
+	Networks *meshconfig.MeshNetworks `json:"-"`
 
 	// Discovery interface for listing services and instances.
 	ServiceDiscovery `json:"-"`
@@ -205,14 +142,13 @@ type PushContext struct {
 	// AuthnBetaPolicies contains (beta) Authn policies by namespace.
 	AuthnBetaPolicies *AuthenticationPolicies `json:"-"`
 
+	initDone bool
+
 	Version string
 
 	// cache gateways addresses for each network
 	// this is mainly used for kubernetes multi-cluster scenario
 	networkGateways map[string][]*Gateway
-
-	initDone        atomic.Bool
-	initializeMutex sync.Mutex
 }
 
 // Gateway is the gateway of a network
@@ -229,12 +165,12 @@ type processedDestRules struct {
 	// Map of dest rule host to the list of namespaces to which this destination rule has been exported to
 	exportTo map[host.Name]map[visibility.Instance]bool
 	// Map of dest rule host and the merged destination rules for that host
-	destRule map[host.Name]*config.Config
+	destRule map[host.Name]*Config
 }
 
 // XDSUpdater is used for direct updates of the xDS model and incremental push.
 // Pilot uses multiple registries - for example each K8S cluster is a registry
-// instance. Each registry is responsible for tracking a set
+// instance, as well as consul. Each registry is responsible for tracking a set
 // of endpoints associated with mesh services, and calling the EDSUpdate on changes.
 // A registry may group endpoints for a service in smaller subsets - for example by
 // deployment, or to deal with very large number of endpoints for a service. We want
@@ -252,14 +188,7 @@ type XDSUpdater interface {
 	// For each cluster and hostname, the full list of active endpoints (including empty list)
 	// must be sent. The shard name is used as a key - current implementation is using the
 	// registry name.
-	EDSUpdate(shard, hostname string, namespace string, entry []*IstioEndpoint)
-
-	// EDSCacheUpdate is called when the list of endpoints or labels in a Service is changed.
-	// For each cluster and hostname, the full list of active endpoints (including empty list)
-	// must be sent. The shard name is used as a key - current implementation is using the
-	// registry name.
-	// Note: the difference with `EDSUpdate` is that it only update the cache rather than requesting a push
-	EDSCacheUpdate(shard, hostname string, namespace string, entry []*IstioEndpoint)
+	EDSUpdate(shard, hostname string, namespace string, entry []*IstioEndpoint) error
 
 	// SvcUpdate is called when a service definition is updated/deleted.
 	SvcUpdate(shard, hostname string, namespace string, event Event)
@@ -276,13 +205,7 @@ type XDSUpdater interface {
 // PushRequest defines a request to push to proxies
 // It is used to send updates to the config update debouncer and pass to the PushQueue.
 type PushRequest struct {
-	// Full determines whether a full push is required or not. If false, an incremental update will be sent.
-	// Incremental pushes:
-	// * Do not recompute the push context
-	// * Do not recompute proxy state (such as ServiceInstances)
-	// * Are not reported in standard metrics such as push time
-	// As a result, configuration updates should never be incremental. Generally, only EDS will set this, but
-	// in the future SDS will as well.
+	// Full determines whether a full push is required or not. If set to false, only endpoints will be sent.
 	Full bool
 
 	// ConfigsUpdated keeps track of configs that have changed.
@@ -324,8 +247,6 @@ const (
 	UnknownTrigger TriggerReason = "unknown"
 	// Describes a push triggered for debugging
 	DebugTrigger TriggerReason = "debug"
-	// Describes a push triggered for a Secret change
-	SecretTrigger TriggerReason = "secret"
 )
 
 // Merge two update requests together
@@ -372,10 +293,15 @@ type ProxyPushStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
+// IsMixerEnabled returns true if mixer is enabled in the Mesh config.
+func (ps *PushContext) IsMixerEnabled() bool {
+	return ps != nil && ps.Mesh != nil && (ps.Mesh.MixerCheckServer != "" || ps.Mesh.MixerReportServer != "")
+}
+
 // AddMetric will add an case to the metric.
-func (ps *PushContext) AddMetric(metric monitoring.Metric, key string, proxyID, msg string) {
+func (ps *PushContext) AddMetric(metric monitoring.Metric, key string, proxy *Proxy, msg string) {
 	if ps == nil {
-		log.Infof("Metric without context %s %v %s", key, proxyID, msg)
+		log.Infof("Metric without context %s %v %s", key, proxy, msg)
 		return
 	}
 	ps.proxyStatusMutex.Lock()
@@ -386,7 +312,10 @@ func (ps *PushContext) AddMetric(metric monitoring.Metric, key string, proxyID, 
 		metricMap = map[string]ProxyPushStatus{}
 		ps.ProxyStatus[metric.Name()] = metricMap
 	}
-	ev := ProxyPushStatus{Message: msg, Proxy: proxyID}
+	ev := ProxyPushStatus{Message: msg}
+	if proxy != nil {
+		ev.Proxy = proxy.ID
+	}
 	metricMap[key] = ev
 }
 
@@ -517,14 +446,22 @@ func init() {
 func NewPushContext() *PushContext {
 	// TODO: detect push in progress, don't update status if set
 	return &PushContext{
-		ServiceIndex:            newServiceIndex(),
-		virtualServiceIndex:     newVirtualServiceIndex(),
-		destinationRuleIndex:    newDestinationRuleIndex(),
-		sidecarsByNamespace:     map[string][]*SidecarScope{},
-		envoyFiltersByNamespace: map[string][]*EnvoyFilterWrapper{},
-		gatewayIndex:            newGatewayIndex(),
-		ProxyStatus:             map[string]map[string]ProxyPushStatus{},
-		ServiceAccounts:         map[host.Name]map[int][]string{},
+		publicServices:                              []*Service{},
+		privateServicesByNamespace:                  map[string][]*Service{},
+		servicesExportedToNamespace:                 map[string][]*Service{},
+		publicVirtualServicesByGateway:              map[string][]Config{},
+		privateVirtualServicesByNamespaceAndGateway: map[string]map[string][]Config{},
+		virtualServicesExportedToNamespaceByGateway: map[string]map[string][]Config{},
+		namespaceLocalDestRules:                     map[string]*processedDestRules{},
+		exportedDestRulesByNamespace:                map[string]*processedDestRules{},
+		sidecarsByNamespace:                         map[string][]*SidecarScope{},
+		envoyFiltersByNamespace:                     map[string][]*EnvoyFilterWrapper{},
+		gatewaysByNamespace:                         map[string][]Config{},
+		allGateways:                                 []Config{},
+		ServiceByHostnameAndNamespace:               map[host.Name]map[string]*Service{},
+		ServiceByHostname:                           map[host.Name]*Service{},
+		ProxyStatus:                                 map[string]map[string]ProxyPushStatus{},
+		ServiceAccounts:                             map[host.Name]map[int][]string{},
 	}
 }
 
@@ -648,16 +585,16 @@ func (ps *PushContext) Services(proxy *Proxy) []*Service {
 
 	// First add private services and explicitly exportedTo services
 	if proxy == nil {
-		for _, privateServices := range ps.ServiceIndex.privateByNamespace {
+		for _, privateServices := range ps.privateServicesByNamespace {
 			out = append(out, privateServices...)
 		}
 	} else {
-		out = append(out, ps.ServiceIndex.privateByNamespace[proxy.ConfigNamespace]...)
-		out = append(out, ps.ServiceIndex.exportedToNamespace[proxy.ConfigNamespace]...)
+		out = append(out, ps.privateServicesByNamespace[proxy.ConfigNamespace]...)
+		out = append(out, ps.servicesExportedToNamespace[proxy.ConfigNamespace]...)
 	}
 
 	// Second add public services
-	out = append(out, ps.ServiceIndex.public...)
+	out = append(out, ps.publicServices...)
 
 	return out
 }
@@ -670,7 +607,7 @@ func (ps *PushContext) ServiceForHostname(proxy *Proxy, hostname host.Name) *Ser
 
 	// SidecarScope shouldn't be null here. If it is, we can't disambiguate the hostname to use for a namespace,
 	// so the selection must be undefined.
-	for _, service := range ps.ServiceIndex.HostnameAndNamespace[hostname] {
+	for _, service := range ps.ServiceByHostnameAndNamespace[hostname] {
 		return service
 	}
 
@@ -681,18 +618,18 @@ func (ps *PushContext) ServiceForHostname(proxy *Proxy, hostname host.Name) *Ser
 // VirtualServicesForGateway lists all virtual services bound to the specified gateways
 // This replaces store.VirtualServices. Used only by the gateways
 // Sidecars use the egressListener.VirtualServices().
-func (ps *PushContext) VirtualServicesForGateway(proxy *Proxy, gateway string) []config.Config {
-	res := ps.virtualServiceIndex.privateByNamespaceAndGateway[proxy.ConfigNamespace][gateway]
-	res = append(res, ps.virtualServiceIndex.exportedToNamespaceByGateway[proxy.ConfigNamespace][gateway]...)
-	res = append(res, ps.virtualServiceIndex.publicByGateway[gateway]...)
+func (ps *PushContext) VirtualServicesForGateway(proxy *Proxy, gateway string) []Config {
+	res := ps.privateVirtualServicesByNamespaceAndGateway[proxy.ConfigNamespace][gateway]
+	res = append(res, ps.virtualServicesExportedToNamespaceByGateway[proxy.ConfigNamespace][gateway]...)
+	res = append(res, ps.publicVirtualServicesByGateway[gateway]...)
 	return res
 }
 
 // DelegateVirtualServicesConfigKey lists all the delegate virtual services configkeys associated with the provided virtual services
-func (ps *PushContext) DelegateVirtualServicesConfigKey(vses []config.Config) []ConfigKey {
+func (ps *PushContext) DelegateVirtualServicesConfigKey(vses []Config) []ConfigKey {
 	var out []ConfigKey
 	for _, vs := range vses {
-		out = append(out, ps.virtualServiceIndex.delegates[ConfigKey{Kind: gvk.VirtualService, Namespace: vs.Namespace, Name: vs.Name}]...)
+		out = append(out, ps.delegateVirtualServices[ConfigKey{Kind: gvk.VirtualService, Namespace: vs.Namespace, Name: vs.Name}]...)
 	}
 
 	return out
@@ -718,6 +655,7 @@ func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Colle
 	if sidecars, ok := ps.sidecarsByNamespace[proxy.ConfigNamespace]; ok {
 		// TODO: logic to merge multiple sidecar resources
 		// Currently we assume that there will be only one sidecar config for a namespace.
+		var defaultSidecar *SidecarScope
 		for _, wrapper := range sidecars {
 			if wrapper.Config != nil && wrapper.Config.Spec != nil {
 				sidecar := wrapper.Config.Spec.(*networking.Sidecar)
@@ -725,19 +663,22 @@ func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Colle
 				// if there is a workload selector, check for matching workload labels
 				if sidecar.GetWorkloadSelector() != nil {
 					workloadSelector := labels.Instance(sidecar.GetWorkloadSelector().GetLabels())
-					// exclude workload selector that not match
 					if !workloadLabels.IsSupersetOf(workloadSelector) {
 						continue
 					}
+					return wrapper
 				}
-
-				// it is guaranteed sidecars with selectors are put in front
-				// and the sidecars are sorted by creation timestamp,
-				// return exact/wildcard matching one directly
-				return wrapper
+				defaultSidecar = wrapper
+				continue
 			}
-			// this happens at last, it is the default sidecar scope
+			// Not sure when this can happen (Config = nil ?)
+			if defaultSidecar != nil {
+				return defaultSidecar // still return the valid one
+			}
 			return wrapper
+		}
+		if defaultSidecar != nil {
+			return defaultSidecar // still return the valid one
 		}
 	}
 
@@ -745,7 +686,7 @@ func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Colle
 }
 
 // DestinationRule returns a destination rule for a service name in a given domain.
-func (ps *PushContext) DestinationRule(proxy *Proxy, service *Service) *config.Config {
+func (ps *PushContext) DestinationRule(proxy *Proxy, service *Service) *Config {
 	if service == nil {
 		return nil
 	}
@@ -770,19 +711,11 @@ func (ps *PushContext) DestinationRule(proxy *Proxy, service *Service) *config.C
 	// 1. select destination rule from proxy config namespace
 	if proxy.ConfigNamespace != ps.Mesh.RootNamespace {
 		// search through the DestinationRules in proxy's namespace first
-		if ps.destinationRuleIndex.namespaceLocal[proxy.ConfigNamespace] != nil {
+		if ps.namespaceLocalDestRules[proxy.ConfigNamespace] != nil {
 			if hostname, ok := MostSpecificHostMatch(service.Hostname,
-				ps.destinationRuleIndex.namespaceLocal[proxy.ConfigNamespace].hosts); ok {
-				return ps.destinationRuleIndex.namespaceLocal[proxy.ConfigNamespace].destRule[hostname]
+				ps.namespaceLocalDestRules[proxy.ConfigNamespace].hosts); ok {
+				return ps.namespaceLocalDestRules[proxy.ConfigNamespace].destRule[hostname]
 			}
-		}
-	} else {
-		// If this is a namespace local DR in the same namespace, this must be meant for this proxy, so we do not
-		// need to worry about overriding other DRs with *.local type rules here. If we ignore this, then exportTo=. in
-		// root namespace would always be ignored
-		if hostname, ok := MostSpecificHostMatch(service.Hostname,
-			ps.destinationRuleIndex.rootNamespaceLocal.hosts); ok {
-			return ps.destinationRuleIndex.rootNamespaceLocal.destRule[hostname]
 		}
 	}
 
@@ -811,6 +744,7 @@ func (ps *PushContext) DestinationRule(proxy *Proxy, service *Service) *config.C
 
 	// 4. if no public/private rule in calling proxy's namespace matched, and no public rule in the
 	// target service's namespace matched, search for any exported destination rule in the config root namespace
+	// NOTE: This does mean that we are effectively ignoring private dest rules in the config root namespace
 	if out := ps.getExportedDestinationRuleFromNamespace(ps.Mesh.RootNamespace, service.Hostname, proxy.ConfigNamespace); out != nil {
 		return out
 	}
@@ -818,13 +752,13 @@ func (ps *PushContext) DestinationRule(proxy *Proxy, service *Service) *config.C
 	return nil
 }
 
-func (ps *PushContext) getExportedDestinationRuleFromNamespace(owningNamespace string, hostname host.Name, clientNamespace string) *config.Config {
-	if ps.destinationRuleIndex.exportedByNamespace[owningNamespace] != nil {
-		if specificHostname, ok := MostSpecificHostMatch(hostname, ps.destinationRuleIndex.exportedByNamespace[owningNamespace].hosts); ok {
+func (ps *PushContext) getExportedDestinationRuleFromNamespace(owningNamespace string, hostname host.Name, clientNamespace string) *Config {
+	if ps.exportedDestRulesByNamespace[owningNamespace] != nil {
+		if specificHostname, ok := MostSpecificHostMatch(hostname, ps.exportedDestRulesByNamespace[owningNamespace].hosts); ok {
 			// Check if the dest rule for this host is actually exported to the proxy's (client) namespace
-			exportToMap := ps.destinationRuleIndex.exportedByNamespace[owningNamespace].exportTo[specificHostname]
+			exportToMap := ps.exportedDestRulesByNamespace[owningNamespace].exportTo[specificHostname]
 			if len(exportToMap) == 0 || exportToMap[visibility.Public] || exportToMap[visibility.Instance(clientNamespace)] {
-				return ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRule[specificHostname]
+				return ps.exportedDestRulesByNamespace[owningNamespace].destRule[specificHostname]
 			}
 		}
 	}
@@ -867,16 +801,14 @@ func (ps *PushContext) SubsetToLabels(proxy *Proxy, subsetName string, hostname 
 // This should be called before starting the push, from the thread creating
 // the push context.
 func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext, pushReq *PushRequest) error {
-	// Acquire a lock to ensure we don't concurrently initialize the same PushContext.
-	// If this does happen, one thread will block then exit early from initDone=true
-	ps.initializeMutex.Lock()
-	defer ps.initializeMutex.Unlock()
-	if ps.initDone.Load() {
+	ps.Mutex.Lock()
+	defer ps.Mutex.Unlock()
+	if ps.initDone {
 		return nil
 	}
 
 	ps.Mesh = env.Mesh()
-	ps.MeshNetworks = env.Networks()
+	ps.Networks = env.Networks()
 	ps.ServiceDiscovery = env
 	ps.IstioConfigStore = env
 	ps.Version = env.Version()
@@ -887,7 +819,7 @@ func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext
 	ps.initDefaultExportMaps()
 
 	// create new or incremental update
-	if pushReq == nil || oldPushContext == nil || !oldPushContext.initDone.Load() || len(pushReq.ConfigsUpdated) == 0 {
+	if pushReq == nil || oldPushContext == nil || !oldPushContext.initDone || len(pushReq.ConfigsUpdated) == 0 {
 		if err := ps.createNewContext(env); err != nil {
 			return err
 		}
@@ -902,7 +834,7 @@ func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext
 
 	ps.initClusterLocalHosts(env)
 
-	ps.initDone.Store(true)
+	ps.initDone = true
 	return nil
 }
 
@@ -936,6 +868,14 @@ func (ps *PushContext) createNewContext(env *Environment) error {
 		return err
 	}
 
+	if err := ps.initQuotaSpecs(env); err != nil {
+		return err
+	}
+
+	if err := ps.initQuotaSpecBindings(env); err != nil {
+		return err
+	}
+
 	// Must be initialized in the end
 	if err := ps.initSidecarScopes(env); err != nil {
 		return err
@@ -949,7 +889,7 @@ func (ps *PushContext) updateContext(
 	pushReq *PushRequest) error {
 
 	var servicesChanged, virtualServicesChanged, destinationRulesChanged, gatewayChanged,
-		authnChanged, authzChanged, envoyFiltersChanged, sidecarsChanged bool
+		authnChanged, authzChanged, envoyFiltersChanged, sidecarsChanged, quotasChanged bool
 
 	for conf := range pushReq.ConfigsUpdated {
 		switch conf.Kind {
@@ -970,7 +910,11 @@ func (ps *PushContext) updateContext(
 		case gvk.RequestAuthentication,
 			gvk.PeerAuthentication:
 			authnChanged = true
-		case collections.K8SServiceApisV1Alpha1Httproutes.Resource().GroupVersionKind(),
+		case gvk.QuotaSpecBinding,
+			gvk.QuotaSpec:
+			quotasChanged = true
+		case collections.K8SServiceApisV1Alpha1Trafficsplits.Resource().GroupVersionKind(),
+			collections.K8SServiceApisV1Alpha1Httproutes.Resource().GroupVersionKind(),
 			collections.K8SServiceApisV1Alpha1Tcproutes.Resource().GroupVersionKind(),
 			collections.K8SServiceApisV1Alpha1Gateways.Resource().GroupVersionKind(),
 			collections.K8SServiceApisV1Alpha1Gatewayclasses.Resource().GroupVersionKind():
@@ -985,8 +929,11 @@ func (ps *PushContext) updateContext(
 			return err
 		}
 	} else {
-		// make sure we copy over things that would be generated in initServiceRegistry
-		ps.ServiceIndex = oldPushContext.ServiceIndex
+		ps.privateServicesByNamespace = oldPushContext.privateServicesByNamespace
+		ps.servicesExportedToNamespace = oldPushContext.servicesExportedToNamespace
+		ps.publicServices = oldPushContext.publicServices
+		ps.ServiceByHostnameAndNamespace = oldPushContext.ServiceByHostnameAndNamespace
+		ps.ServiceByHostname = oldPushContext.ServiceByHostname
 		ps.ServiceAccounts = oldPushContext.ServiceAccounts
 	}
 
@@ -995,7 +942,9 @@ func (ps *PushContext) updateContext(
 			return err
 		}
 	} else {
-		ps.virtualServiceIndex = oldPushContext.virtualServiceIndex
+		ps.virtualServicesExportedToNamespaceByGateway = oldPushContext.virtualServicesExportedToNamespaceByGateway
+		ps.privateVirtualServicesByNamespaceAndGateway = oldPushContext.privateVirtualServicesByNamespaceAndGateway
+		ps.publicVirtualServicesByGateway = oldPushContext.publicVirtualServicesByGateway
 	}
 
 	if destinationRulesChanged {
@@ -1003,7 +952,8 @@ func (ps *PushContext) updateContext(
 			return err
 		}
 	} else {
-		ps.destinationRuleIndex = oldPushContext.destinationRuleIndex
+		ps.namespaceLocalDestRules = oldPushContext.namespaceLocalDestRules
+		ps.exportedDestRulesByNamespace = oldPushContext.exportedDestRulesByNamespace
 	}
 
 	if authnChanged {
@@ -1036,7 +986,20 @@ func (ps *PushContext) updateContext(
 			return err
 		}
 	} else {
-		ps.gatewayIndex = oldPushContext.gatewayIndex
+		ps.gatewaysByNamespace = oldPushContext.gatewaysByNamespace
+		ps.allGateways = oldPushContext.allGateways
+	}
+
+	if quotasChanged {
+		if err := ps.initQuotaSpecs(env); err != nil {
+			return err
+		}
+		if err := ps.initQuotaSpecBindings(env); err != nil {
+			return err
+		}
+	} else {
+		ps.QuotaSpec = oldPushContext.QuotaSpec
+		ps.QuotaSpecBinding = oldPushContext.QuotaSpecBinding
 	}
 
 	// Must be initialized in the end
@@ -1062,42 +1025,19 @@ func (ps *PushContext) initServiceRegistry(env *Environment) error {
 	// Sort the services in order of creation.
 	allServices := sortServicesByCreationTime(services)
 	for _, s := range allServices {
-		s.Mutex.RLock()
-		ps.ServiceIndex.ClusterVIPs[s] = make(map[string]string)
-		for k, v := range s.ClusterVIPs {
-			ps.ServiceIndex.ClusterVIPs[s][k] = v
-		}
-		s.Mutex.RUnlock()
-
-		// Precache instances
-		for _, port := range s.Ports {
-			if _, ok := ps.ServiceIndex.instancesByPort[s]; !ok {
-				ps.ServiceIndex.instancesByPort[s] = make(map[int][]*ServiceInstance)
-			}
-			instances := make([]*ServiceInstance, 0)
-			instances = append(instances, ps.InstancesByPort(s, port.Port, nil)...)
-			ps.ServiceIndex.instancesByPort[s][port.Port] = instances
-		}
-
-		if _, f := ps.ServiceIndex.HostnameAndNamespace[s.Hostname]; !f {
-			ps.ServiceIndex.HostnameAndNamespace[s.Hostname] = map[string]*Service{}
-		}
-		ps.ServiceIndex.HostnameAndNamespace[s.Hostname][s.Attributes.Namespace] = s
-		ps.ServiceIndex.Hostname[s.Hostname] = s
-
 		ns := s.Attributes.Namespace
 		if len(s.Attributes.ExportTo) == 0 {
-			if ps.exportToDefaults.service[visibility.Private] {
-				ps.ServiceIndex.privateByNamespace[ns] = append(ps.ServiceIndex.privateByNamespace[ns], s)
-			} else if ps.exportToDefaults.service[visibility.Public] {
-				ps.ServiceIndex.public = append(ps.ServiceIndex.public, s)
+			if ps.defaultServiceExportTo[visibility.Private] {
+				ps.privateServicesByNamespace[ns] = append(ps.privateServicesByNamespace[ns], s)
+			} else if ps.defaultServiceExportTo[visibility.Public] {
+				ps.publicServices = append(ps.publicServices, s)
 			}
 		} else {
 			// if service has exportTo ~ - i.e. not visible to anyone, ignore all exportTos
 			// if service has exportTo *, make public and ignore all other exportTos
 			// if service has exportTo ., replace with current namespace
 			if s.Attributes.ExportTo[visibility.Public] {
-				ps.ServiceIndex.public = append(ps.ServiceIndex.public, s)
+				ps.publicServices = append(ps.publicServices, s)
 				continue
 			} else if s.Attributes.ExportTo[visibility.None] {
 				continue
@@ -1106,14 +1046,19 @@ func (ps *PushContext) initServiceRegistry(env *Environment) error {
 				for exportTo := range s.Attributes.ExportTo {
 					if exportTo == visibility.Private || string(exportTo) == ns {
 						// exportTo with same namespace is effectively private
-						ps.ServiceIndex.privateByNamespace[ns] = append(ps.ServiceIndex.privateByNamespace[ns], s)
+						ps.privateServicesByNamespace[ns] = append(ps.privateServicesByNamespace[ns], s)
 					} else {
 						// exportTo is a specific target namespace
-						ps.ServiceIndex.exportedToNamespace[string(exportTo)] = append(ps.ServiceIndex.exportedToNamespace[string(exportTo)], s)
+						ps.servicesExportedToNamespace[string(exportTo)] = append(ps.servicesExportedToNamespace[string(exportTo)], s)
 					}
 				}
 			}
 		}
+		if _, f := ps.ServiceByHostnameAndNamespace[s.Hostname]; !f {
+			ps.ServiceByHostnameAndNamespace[s.Hostname] = map[string]*Service{}
+		}
+		ps.ServiceByHostnameAndNamespace[s.Hostname][s.Attributes.Namespace] = s
+		ps.ServiceByHostname[s.Hostname] = s
 	}
 
 	ps.initServiceAccounts(env, allServices)
@@ -1157,9 +1102,9 @@ func (ps *PushContext) initAuthnPolicies(env *Environment) error {
 
 // Caches list of virtual services
 func (ps *PushContext) initVirtualServices(env *Environment) error {
-	ps.virtualServiceIndex.exportedToNamespaceByGateway = map[string]map[string][]config.Config{}
-	ps.virtualServiceIndex.privateByNamespaceAndGateway = map[string]map[string][]config.Config{}
-	ps.virtualServiceIndex.publicByGateway = map[string][]config.Config{}
+	ps.virtualServicesExportedToNamespaceByGateway = map[string]map[string][]Config{}
+	ps.privateVirtualServicesByNamespaceAndGateway = map[string]map[string][]Config{}
+	ps.publicVirtualServicesByGateway = map[string][]Config{}
 
 	virtualServices, err := env.List(gvk.VirtualService, NamespaceAll)
 	if err != nil {
@@ -1168,7 +1113,7 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 
 	// values returned from ConfigStore.List are immutable.
 	// Therefore, we make a copy
-	vservices := make([]config.Config, len(virtualServices))
+	vservices := make([]Config, len(virtualServices))
 
 	for i := range vservices {
 		vservices[i] = virtualServices[i].DeepCopy()
@@ -1182,31 +1127,30 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 	// the RDS code. See separateVSHostsAndServices in route/route.go
 	sortConfigByCreationTime(vservices)
 
-	vservices, ps.virtualServiceIndex.delegates = mergeVirtualServicesIfNeeded(vservices, ps.exportToDefaults.virtualService)
-
+	vservices, ps.delegateVirtualServices = mergeVirtualServicesIfNeeded(vservices, ps.defaultVirtualServiceExportTo)
 	// convert all shortnames in virtual services into FQDNs
 	for _, r := range vservices {
-		resolveVirtualServiceShortnames(r.Spec.(*networking.VirtualService), r.Meta)
+		resolveVirtualServiceShortnames(r.Spec.(*networking.VirtualService), r.ConfigMeta)
 	}
 
 	for _, virtualService := range vservices {
 		ns := virtualService.Namespace
 		rule := virtualService.Spec.(*networking.VirtualService)
-		gwNames := getGatewayNames(rule, virtualService.Meta)
+		gwNames := getGatewayNames(rule, virtualService.ConfigMeta)
 		if len(rule.ExportTo) == 0 {
 			// No exportTo in virtualService. Use the global default
 			// We only honor ., *
-			if ps.exportToDefaults.virtualService[visibility.Private] {
-				if _, f := ps.virtualServiceIndex.privateByNamespaceAndGateway[ns]; !f {
-					ps.virtualServiceIndex.privateByNamespaceAndGateway[ns] = map[string][]config.Config{}
+			if ps.defaultVirtualServiceExportTo[visibility.Private] {
+				if _, f := ps.privateVirtualServicesByNamespaceAndGateway[ns]; !f {
+					ps.privateVirtualServicesByNamespaceAndGateway[ns] = map[string][]Config{}
 				}
 				// add to local namespace only
 				for _, gw := range gwNames {
-					ps.virtualServiceIndex.privateByNamespaceAndGateway[ns][gw] = append(ps.virtualServiceIndex.privateByNamespaceAndGateway[ns][gw], virtualService)
+					ps.privateVirtualServicesByNamespaceAndGateway[ns][gw] = append(ps.privateVirtualServicesByNamespaceAndGateway[ns][gw], virtualService)
 				}
-			} else if ps.exportToDefaults.virtualService[visibility.Public] {
+			} else if ps.defaultVirtualServiceExportTo[visibility.Public] {
 				for _, gw := range gwNames {
-					ps.virtualServiceIndex.publicByGateway[gw] = append(ps.virtualServiceIndex.publicByGateway[gw], virtualService)
+					ps.publicVirtualServicesByGateway[gw] = append(ps.publicVirtualServicesByGateway[gw], virtualService)
 				}
 			}
 		} else {
@@ -1219,7 +1163,7 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 			// if vs has exportTo ., replace with current namespace
 			if exportToMap[visibility.Public] {
 				for _, gw := range gwNames {
-					ps.virtualServiceIndex.publicByGateway[gw] = append(ps.virtualServiceIndex.publicByGateway[gw], virtualService)
+					ps.publicVirtualServicesByGateway[gw] = append(ps.publicVirtualServicesByGateway[gw], virtualService)
 				}
 				continue
 			} else if exportToMap[visibility.None] {
@@ -1229,21 +1173,21 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 				// . or other namespaces
 				for exportTo := range exportToMap {
 					if exportTo == visibility.Private || string(exportTo) == ns {
-						if _, f := ps.virtualServiceIndex.privateByNamespaceAndGateway[ns]; !f {
-							ps.virtualServiceIndex.privateByNamespaceAndGateway[ns] = map[string][]config.Config{}
+						if _, f := ps.privateVirtualServicesByNamespaceAndGateway[ns]; !f {
+							ps.privateVirtualServicesByNamespaceAndGateway[ns] = map[string][]Config{}
 						}
 						// add to local namespace only
 						for _, gw := range gwNames {
-							ps.virtualServiceIndex.privateByNamespaceAndGateway[ns][gw] = append(ps.virtualServiceIndex.privateByNamespaceAndGateway[ns][gw], virtualService)
+							ps.privateVirtualServicesByNamespaceAndGateway[ns][gw] = append(ps.privateVirtualServicesByNamespaceAndGateway[ns][gw], virtualService)
 						}
 					} else {
-						if _, f := ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)]; !f {
-							ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)] = map[string][]config.Config{}
+						if _, f := ps.virtualServicesExportedToNamespaceByGateway[string(exportTo)]; !f {
+							ps.virtualServicesExportedToNamespaceByGateway[string(exportTo)] = map[string][]Config{}
 						}
 						// add to local namespace only
 						for _, gw := range gwNames {
-							ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)][gw] =
-								append(ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)][gw], virtualService)
+							ps.virtualServicesExportedToNamespaceByGateway[string(exportTo)][gw] =
+								append(ps.virtualServicesExportedToNamespaceByGateway[string(exportTo)][gw], virtualService)
 						}
 					}
 				}
@@ -1256,7 +1200,7 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 
 var meshGateways = []string{constants.IstioMeshGateway}
 
-func getGatewayNames(vs *networking.VirtualService, meta config.Meta) []string {
+func getGatewayNames(vs *networking.VirtualService, meta ConfigMeta) []string {
 	if len(vs.Gateways) == 0 {
 		return meshGateways
 	}
@@ -1273,32 +1217,32 @@ func getGatewayNames(vs *networking.VirtualService, meta config.Meta) []string {
 }
 
 func (ps *PushContext) initDefaultExportMaps() {
-	ps.exportToDefaults.destinationRule = make(map[visibility.Instance]bool)
+	ps.defaultDestinationRuleExportTo = make(map[visibility.Instance]bool)
 	if ps.Mesh.DefaultDestinationRuleExportTo != nil {
 		for _, e := range ps.Mesh.DefaultDestinationRuleExportTo {
-			ps.exportToDefaults.destinationRule[visibility.Instance(e)] = true
+			ps.defaultDestinationRuleExportTo[visibility.Instance(e)] = true
 		}
 	} else {
 		// default to *
-		ps.exportToDefaults.destinationRule[visibility.Public] = true
+		ps.defaultDestinationRuleExportTo[visibility.Public] = true
 	}
 
-	ps.exportToDefaults.service = make(map[visibility.Instance]bool)
+	ps.defaultServiceExportTo = make(map[visibility.Instance]bool)
 	if ps.Mesh.DefaultServiceExportTo != nil {
 		for _, e := range ps.Mesh.DefaultServiceExportTo {
-			ps.exportToDefaults.service[visibility.Instance(e)] = true
+			ps.defaultServiceExportTo[visibility.Instance(e)] = true
 		}
 	} else {
-		ps.exportToDefaults.service[visibility.Public] = true
+		ps.defaultServiceExportTo[visibility.Public] = true
 	}
 
-	ps.exportToDefaults.virtualService = make(map[visibility.Instance]bool)
+	ps.defaultVirtualServiceExportTo = make(map[visibility.Instance]bool)
 	if ps.Mesh.DefaultVirtualServiceExportTo != nil {
 		for _, e := range ps.Mesh.DefaultVirtualServiceExportTo {
-			ps.exportToDefaults.virtualService[visibility.Instance(e)] = true
+			ps.defaultVirtualServiceExportTo[visibility.Instance(e)] = true
 		}
 	} else {
-		ps.exportToDefaults.virtualService[visibility.Public] = true
+		ps.defaultVirtualServiceExportTo[visibility.Public] = true
 	}
 }
 
@@ -1322,8 +1266,8 @@ func (ps *PushContext) initSidecarScopes(env *Environment) error {
 
 	sortConfigByCreationTime(sidecarConfigs)
 
-	sidecarConfigWithSelector := make([]config.Config, 0)
-	sidecarConfigWithoutSelector := make([]config.Config, 0)
+	sidecarConfigWithSelector := make([]Config, 0)
+	sidecarConfigWithoutSelector := make([]Config, 0)
 	sidecarsWithoutSelectorByNamespace := make(map[string]struct{})
 	for _, sidecarConfig := range sidecarConfigs {
 		sidecar := sidecarConfig.Spec.(*networking.Sidecar)
@@ -1336,7 +1280,7 @@ func (ps *PushContext) initSidecarScopes(env *Environment) error {
 	}
 
 	sidecarNum := len(sidecarConfigs)
-	sidecarConfigs = make([]config.Config, 0, sidecarNum)
+	sidecarConfigs = make([]Config, 0, sidecarNum)
 	sidecarConfigs = append(sidecarConfigs, sidecarConfigWithSelector...)
 	sidecarConfigs = append(sidecarConfigs, sidecarConfigWithoutSelector...)
 
@@ -1350,7 +1294,7 @@ func (ps *PushContext) initSidecarScopes(env *Environment) error {
 	// Hold reference root namespace's sidecar config
 	// Root namespace can have only one sidecar config object
 	// Currently we expect that it has no workloadSelectors
-	var rootNSConfig *config.Config
+	var rootNSConfig *Config
 	if ps.Mesh.RootNamespace != "" {
 		for _, sidecarConfig := range sidecarConfigs {
 			if sidecarConfig.Namespace == ps.Mesh.RootNamespace &&
@@ -1365,7 +1309,7 @@ func (ps *PushContext) initSidecarScopes(env *Environment) error {
 	// Derive the sidecar scope from the root namespace's sidecar object if present. Else fallback
 	// to the default Istio behavior mimicked by the DefaultSidecarScopeForNamespace function.
 	namespaces := sets.NewSet()
-	for _, nsMap := range ps.ServiceIndex.HostnameAndNamespace {
+	for _, nsMap := range ps.ServiceByHostnameAndNamespace {
 		for ns := range nsMap {
 			namespaces.Insert(ns)
 		}
@@ -1388,7 +1332,7 @@ func (ps *PushContext) initDestinationRules(env *Environment) error {
 
 	// values returned from ConfigStore.List are immutable.
 	// Therefore, we make a copy
-	destRules := make([]config.Config, len(configs))
+	destRules := make([]Config, len(configs))
 	for i := range destRules {
 		destRules[i] = configs[i].DeepCopy()
 	}
@@ -1397,29 +1341,20 @@ func (ps *PushContext) initDestinationRules(env *Environment) error {
 	return nil
 }
 
-func newProcessedDestRules() *processedDestRules {
-	return &processedDestRules{
-		hosts:    make([]host.Name, 0),
-		exportTo: map[host.Name]map[visibility.Instance]bool{},
-		destRule: map[host.Name]*config.Config{},
-	}
-}
-
 // SetDestinationRules is updates internal structures using a set of configs.
 // Split out of DestinationRule expensive conversions, computed once per push.
 // This also allows tests to inject a config without having the mock.
 // This will not work properly for Sidecars, which will precompute their destination rules on init
-func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+func (ps *PushContext) SetDestinationRules(configs []Config) {
 	// Sort by time first. So if two destination rule have top level traffic policies
 	// we take the first one.
 	sortConfigByCreationTime(configs)
 	namespaceLocalDestRules := make(map[string]*processedDestRules)
 	exportedDestRulesByNamespace := make(map[string]*processedDestRules)
-	rootNamespaceLocalDestRules := newProcessedDestRules()
 
 	for i := range configs {
 		rule := configs[i].Spec.(*networking.DestinationRule)
-		rule.Host = string(ResolveShortnameToFQDN(rule.Host, configs[i].Meta))
+		rule.Host = string(ResolveShortnameToFQDN(rule.Host, configs[i].ConfigMeta))
 		exportToMap := make(map[visibility.Instance]bool)
 		for _, e := range rule.ExportTo {
 			exportToMap[visibility.Instance(e)] = true
@@ -1432,7 +1367,11 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
 			// a proxy from this namespace will first look here for the destination rule for a given service
 			// This pool consists of both public/private destination rules.
 			if _, exist := namespaceLocalDestRules[configs[i].Namespace]; !exist {
-				namespaceLocalDestRules[configs[i].Namespace] = newProcessedDestRules()
+				namespaceLocalDestRules[configs[i].Namespace] = &processedDestRules{
+					hosts:    make([]host.Name, 0),
+					exportTo: map[host.Name]map[visibility.Instance]bool{},
+					destRule: map[host.Name]*Config{},
+				}
 			}
 			// Merge this destination rule with any public/private dest rules for same host in the same namespace
 			// If there are no duplicates, the dest rule will be added to the list
@@ -1442,7 +1381,7 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
 		isPrivateOnly := false
 		// No exportTo in destinationRule. Use the global default
 		// We only honor . and *
-		if len(rule.ExportTo) == 0 && ps.exportToDefaults.destinationRule[visibility.Private] {
+		if len(rule.ExportTo) == 0 && ps.defaultDestinationRuleExportTo[visibility.Private] {
 			isPrivateOnly = true
 		} else if len(rule.ExportTo) == 1 && exportToMap[visibility.Private] {
 			isPrivateOnly = true
@@ -1450,14 +1389,15 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
 
 		if !isPrivateOnly {
 			if _, exist := exportedDestRulesByNamespace[configs[i].Namespace]; !exist {
-				exportedDestRulesByNamespace[configs[i].Namespace] = newProcessedDestRules()
+				exportedDestRulesByNamespace[configs[i].Namespace] = &processedDestRules{
+					hosts:    make([]host.Name, 0),
+					exportTo: map[host.Name]map[visibility.Instance]bool{},
+					destRule: map[host.Name]*Config{},
+				}
 			}
 			// Merge this destination rule with any other exported dest rule for the same host in the same namespace
 			// If there are no duplicates, the dest rule will be added to the list
 			ps.mergeDestinationRule(exportedDestRulesByNamespace[configs[i].Namespace], configs[i], exportToMap)
-		} else if configs[i].Namespace == ps.Mesh.RootNamespace {
-			// Keep track of private root namespace destination rules
-			ps.mergeDestinationRule(rootNamespaceLocalDestRules, configs[i], exportToMap)
 		}
 	}
 
@@ -1470,9 +1410,8 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
 		sort.Sort(host.Names(exportedDestRulesByNamespace[ns].hosts))
 	}
 
-	ps.destinationRuleIndex.namespaceLocal = namespaceLocalDestRules
-	ps.destinationRuleIndex.exportedByNamespace = exportedDestRulesByNamespace
-	ps.destinationRuleIndex.rootNamespaceLocal = rootNamespaceLocalDestRules
+	ps.namespaceLocalDestRules = namespaceLocalDestRules
+	ps.exportedDestRulesByNamespace = exportedDestRulesByNamespace
 }
 
 func (ps *PushContext) initAuthorizationPolicies(env *Environment) error {
@@ -1576,13 +1515,13 @@ func (ps *PushContext) initGateways(env *Environment) error {
 
 	sortConfigByCreationTime(gatewayConfigs)
 
-	ps.gatewayIndex.all = gatewayConfigs
-	ps.gatewayIndex.namespace = make(map[string][]config.Config)
+	ps.allGateways = gatewayConfigs
+	ps.gatewaysByNamespace = make(map[string][]Config)
 	for _, gatewayConfig := range gatewayConfigs {
-		if _, exists := ps.gatewayIndex.namespace[gatewayConfig.Namespace]; !exists {
-			ps.gatewayIndex.namespace[gatewayConfig.Namespace] = make([]config.Config, 0)
+		if _, exists := ps.gatewaysByNamespace[gatewayConfig.Namespace]; !exists {
+			ps.gatewaysByNamespace[gatewayConfig.Namespace] = make([]Config, 0)
 		}
-		ps.gatewayIndex.namespace[gatewayConfig.Namespace] = append(ps.gatewayIndex.namespace[gatewayConfig.Namespace], gatewayConfig)
+		ps.gatewaysByNamespace[gatewayConfig.Namespace] = append(ps.gatewaysByNamespace[gatewayConfig.Namespace], gatewayConfig)
 	}
 	return nil
 }
@@ -1592,13 +1531,13 @@ func (ps *PushContext) mergeGateways(proxy *Proxy) *MergedGateway {
 	if proxy == nil {
 		return nil
 	}
-	out := make([]config.Config, 0)
+	out := make([]Config, 0)
 
-	var configs []config.Config
+	var configs []Config
 	if features.ScopeGatewayToNamespace {
-		configs = ps.gatewayIndex.namespace[proxy.ConfigNamespace]
+		configs = ps.gatewaysByNamespace[proxy.ConfigNamespace]
 	} else {
-		configs = ps.gatewayIndex.all
+		configs = ps.allGateways
 	}
 
 	for _, cfg := range configs {
@@ -1627,34 +1566,36 @@ func (ps *PushContext) mergeGateways(proxy *Proxy) *MergedGateway {
 
 // pre computes gateways for each network
 func (ps *PushContext) initMeshNetworks() {
+	if ps.Networks == nil || len(ps.Networks.Networks) == 0 {
+		return
+	}
+
 	ps.networkGateways = map[string][]*Gateway{}
-
-	// First, use addresses directly specified in meshNetworks
-	if ps.MeshNetworks != nil {
-		for network, networkConf := range ps.MeshNetworks.Networks {
-			gws := networkConf.Gateways
-			for _, gw := range gws {
-				if gwIP := net.ParseIP(gw.GetAddress()); gwIP != nil {
-					ps.networkGateways[network] = append(ps.networkGateways[network], &Gateway{gw.GetAddress(), gw.Port})
-				}
-			}
-
+	for network, networkConf := range ps.Networks.Networks {
+		gws := networkConf.Gateways
+		if len(gws) == 0 {
+			// all endpoints in this network are reachable directly from others. nothing to do.
+			continue
 		}
-	}
 
-	// Second, load registry specific gateways.
-	for network, gateways := range ps.ServiceDiscovery.NetworkGateways() {
-		// - the internal map of label gateways - these get deleted if the service is deleted, updated if the ip changes etc.
-		// - the computed map from meshNetworks (triggered by reloadNetworkLookup, the ported logic from getGatewayAddresses)
-		ps.networkGateways[network] = append(ps.networkGateways[network], gateways...)
-	}
+		registryNames := getNetworkRegistries(networkConf)
+		gateways := []*Gateway{}
 
+		for _, gw := range gws {
+			gateways = append(gateways, getGatewayAddresses(gw, registryNames, ps.ServiceDiscovery)...)
+		}
+
+		log.Debugf("Endpoints from registries %v on network %v reachable through %d gateways",
+			registryNames, network, len(gateways))
+
+		ps.networkGateways[network] = gateways
+	}
 }
 
 func (ps *PushContext) initClusterLocalHosts(e *Environment) {
 	// Create the default list of cluster-local hosts.
 	domainSuffix := e.GetDomainSuffix()
-	defaultClusterLocalHosts := make([]host.Name, 0)
+	defaultClusterLocalHosts := make([]host.Name, 0, len(defaultClusterLocalNamespaces))
 	for _, n := range defaultClusterLocalNamespaces {
 		defaultClusterLocalHosts = append(defaultClusterLocalHosts, host.Name("*."+n+".svc."+domainSuffix))
 	}
@@ -1699,6 +1640,69 @@ func (ps *PushContext) initClusterLocalHosts(e *Environment) {
 	ps.clusterLocalHosts = clusterLocalHosts
 }
 
+func (ps *PushContext) initQuotaSpecs(env *Environment) error {
+	var err error
+	ps.QuotaSpec, err = env.List(gvk.QuotaSpec, NamespaceAll)
+	return err
+}
+
+func (ps *PushContext) initQuotaSpecBindings(env *Environment) error {
+	var err error
+	ps.QuotaSpecBinding, err = env.List(gvk.QuotaSpecBinding, NamespaceAll)
+	return err
+}
+
+func getNetworkRegistries(network *meshconfig.Network) []string {
+	var registryNames []string
+	for _, eps := range network.Endpoints {
+		if eps != nil && len(eps.GetFromRegistry()) > 0 {
+			registryNames = append(registryNames, eps.GetFromRegistry())
+		}
+	}
+	return registryNames
+}
+
+func getGatewayAddresses(gw *meshconfig.Network_IstioNetworkGateway, registryNames []string, discovery ServiceDiscovery) []*Gateway {
+	// First, if a gateway address is provided in the configuration use it. If the gateway address
+	// in the config was a hostname it got already resolved and replaced with an IP address
+	// when loading the config
+	if gwIP := net.ParseIP(gw.GetAddress()); gwIP != nil {
+		return []*Gateway{{gw.GetAddress(), gw.Port}}
+	}
+
+	// Second, try to find the gateway addresses by the provided service name
+	if gwSvcName := gw.GetRegistryServiceName(); gwSvcName != "" {
+		svc, _ := discovery.GetService(host.Name(gwSvcName))
+		if svc == nil {
+			return nil
+		}
+		// No need lock here as the service returned is a new one
+		if svc.Attributes.ClusterExternalAddresses != nil {
+			var gateways []*Gateway
+			for _, clusterName := range registryNames {
+				remotePort := gw.Port
+				// check if we have node port mappings
+				if svc.Attributes.ClusterExternalPorts != nil {
+					if nodePortMap, exists := svc.Attributes.ClusterExternalPorts[clusterName]; exists {
+						// what we now have is a service port. If there is a mapping for cluster external ports,
+						// look it up and get the node port for the remote port
+						if nodePort, exists := nodePortMap[remotePort]; exists {
+							remotePort = nodePort
+						}
+					}
+				}
+				ips := svc.Attributes.ClusterExternalAddresses[clusterName]
+				for _, ip := range ips {
+					gateways = append(gateways, &Gateway{ip, remotePort})
+				}
+			}
+			return gateways
+		}
+	}
+
+	return nil
+}
+
 func (ps *PushContext) NetworkGateways() map[string][]*Gateway {
 	return ps.networkGateways
 }
@@ -1709,6 +1713,10 @@ func (ps *PushContext) NetworkGatewaysByNetwork(network string) []*Gateway {
 	}
 
 	return nil
+}
+
+func (ps *PushContext) QuotaSpecByDestination(hostname host.Name) []Config {
+	return filterQuotaSpecsByDestination(hostname, ps.QuotaSpecBinding, ps.QuotaSpec)
 }
 
 // BestEffortInferServiceMTLSMode infers the mTLS mode for the service + port from all authentication
@@ -1725,7 +1733,7 @@ func (ps *PushContext) BestEffortInferServiceMTLSMode(service *Service, port *Po
 
 	// 1. Check service instances' tls mode, mainly used for headless service.
 	if service.Resolution == Passthrough {
-		instances := ps.ServiceInstancesByPort(service, port.Port, nil)
+		instances, _ := ps.InstancesByPort(service, port.Port, nil)
 		if len(instances) == 0 {
 			return MTLSDisable
 		}
@@ -1745,18 +1753,4 @@ func (ps *PushContext) BestEffortInferServiceMTLSMode(service *Service, port *Po
 
 	// Fallback to permissive.
 	return MTLSPermissive
-}
-
-// ServiceInstancesByPort returns the cached instances by port if it exists, otherwise queries the discovery and returns.
-func (ps *PushContext) ServiceInstancesByPort(svc *Service, port int, labels labels.Collection) []*ServiceInstance {
-	// Use cached version of instances by port when labels are empty. If there are labels,
-	// we will have to make actual call and filter instances by pod labels.
-	if len(labels) == 0 {
-		if instances, exists := ps.ServiceIndex.instancesByPort[svc][port]; exists {
-			return instances
-		}
-	}
-
-	// Fallback to discovery call.
-	return ps.InstancesByPort(svc, port, labels)
 }

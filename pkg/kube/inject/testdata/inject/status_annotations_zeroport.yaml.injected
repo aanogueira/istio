@@ -19,15 +19,16 @@ spec:
         readiness.status.sidecar.istio.io/failureThreshold: "300"
         readiness.status.sidecar.istio.io/initialDelaySeconds: "100"
         readiness.status.sidecar.istio.io/periodSeconds: "200"
+        sidecar.istio.io/interceptionMode: REDIRECT
         sidecar.istio.io/status: '{"version":"","initContainers":["istio-init"],"containers":["istio-proxy"],"volumes":["istio-envoy","istio-data","istio-podinfo","istio-token","istiod-ca-cert"],"imagePullSecrets":null}'
         status.sidecar.istio.io/port: "0"
+        traffic.sidecar.istio.io/includeInboundPorts: "80"
+        traffic.sidecar.istio.io/includeOutboundIPRanges: '*'
       creationTimestamp: null
       labels:
         app: status
         istio.io/rev: ""
         security.istio.io/tlsMode: istio
-        service.istio.io/canonical-name: status
-        service.istio.io/canonical-revision: latest
     spec:
       containers:
       - image: fake.docker.io/google-samples/traffic-go-gke:1.0
@@ -45,6 +46,7 @@ spec:
         - status.$(POD_NAMESPACE)
         - --proxyLogLevel=warning
         - --proxyComponentLogLevel=misc:error
+        - --trust-domain=cluster.local
         - --concurrency
         - "2"
         env:
@@ -91,7 +93,10 @@ spec:
                 {"name":"http","containerPort":80}
             ]
         - name: ISTIO_META_APP_CONTAINERS
-          value: status
+          value: |-
+            [
+                status
+            ]
         - name: ISTIO_META_CLUSTER_ID
           value: Kubernetes
         - name: ISTIO_META_INTERCEPTION_MODE
@@ -105,9 +110,9 @@ spec:
           value: kubernetes://apis/apps/v1/namespaces/default/deployments/statusPort
         - name: ISTIO_META_MESH_ID
           value: cluster.local
-        - name: TRUST_DOMAIN
-          value: cluster.local
         - name: DNS_AGENT
+        - name: ISTIO_KUBE_APP_PROBERS
+          value: '{}'
         image: gcr.io/istio-testing/proxyv2:latest
         imagePullPolicy: Always
         name: istio-proxy
@@ -161,7 +166,7 @@ spec:
         - -b
         - '*'
         - -d
-        - 15090,15021
+        - 15090,15021,
         env:
         - name: DNS_AGENT
         image: gcr.io/istio-testing/proxyv2:latest
@@ -172,8 +177,8 @@ spec:
             cpu: "2"
             memory: 1Gi
           requests:
-            cpu: 100m
-            memory: 128Mi
+            cpu: 10m
+            memory: 10Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

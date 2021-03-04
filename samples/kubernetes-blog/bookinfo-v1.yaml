@@ -21,7 +21,6 @@ metadata:
   name: details
   labels:
     app: details
-    service: details
 spec:
   ports:
   - port: 9080
@@ -33,9 +32,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: details-v1
-  labels:
-    app: details
-    version: v1
 spec:
   replicas: 1
   selector:
@@ -64,7 +60,6 @@ metadata:
   name: reviews
   labels:
     app: reviews
-    service: reviews
 spec:
   ports:
   - port: 9080
@@ -76,9 +71,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: reviews-v1
-  labels:
-    app: reviews
-    version: v1
 spec:
   replicas: 1
   selector:
@@ -107,7 +99,6 @@ metadata:
   name: productpage
   labels:
     app: productpage
-    service: productpage
 spec:
   ports:
   - port: 9080
@@ -119,9 +110,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: productpage-v1
-  labels:
-    app: productpage
-    version: v1
 spec:
   replicas: 1
   selector:

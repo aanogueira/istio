@@ -15,8 +15,6 @@
 package tmpl
 
 import (
-	"fmt"
-
 	"istio.io/istio/pkg/test"
 )
 
@@ -36,15 +34,6 @@ func EvaluateOrFail(t test.Failer, tpl string, data interface{}) string {
 	s, err := Evaluate(tpl, data)
 	if err != nil {
 		t.Fatalf("tmpl.EvaluateOrFail: %v", err)
-	}
-	return s
-}
-
-// MustEvaluate calls Evaluate and panics if there is an error.
-func MustEvaluate(tpl string, data interface{}) string {
-	s, err := Evaluate(tpl, data)
-	if err != nil {
-		panic(fmt.Sprintf("tmpl.MustEvaluate: %v", err))
 	}
 	return s
 }

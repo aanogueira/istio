@@ -21,18 +21,19 @@ import (
 	. "github.com/onsi/gomega"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/pkg/config/mesh"
 	"istio.io/pkg/filewatcher"
+
+	"istio.io/istio/pkg/config/mesh"
 )
 
 func TestNewNetworksWatcherWithBadInputShouldFail(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	_, err := mesh.NewNetworksWatcher(filewatcher.NewWatcher(), "")
 	g.Expect(err).ToNot(BeNil())
 }
 
 func TestNetworksWatcherShouldNotifyHandlers(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	path := newTempFile(t)
 	defer removeSilent(path)

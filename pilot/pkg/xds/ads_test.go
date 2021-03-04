@@ -19,28 +19,25 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/golang/protobuf/proto"
 
 	mesh "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pilot/pkg/util/sets"
 	"istio.io/istio/pilot/pkg/xds"
+	v2 "istio.io/istio/pilot/pkg/xds/v2"
 	v3 "istio.io/istio/pilot/pkg/xds/v3"
-	"istio.io/istio/pilot/test/xdstest"
 	"istio.io/istio/pkg/adsc"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
 	istioagent "istio.io/istio/pkg/istio-agent"
 	"istio.io/istio/pkg/security"
-	"istio.io/istio/pkg/spiffe"
-	"istio.io/istio/pkg/test"
 	"istio.io/istio/tests/util"
 )
 
@@ -79,7 +76,7 @@ func TestAgent(t *testing.T) {
 	defer tearDown()
 
 	// TODO: when authz is implemented, verify labels are checked.
-	cert, key, err := bs.CA.GenKeyCert([]string{spiffe.Identity{"cluster.local", "test", "sa"}.String()}, 1*time.Hour)
+	cert, key, err := bs.CA.GenKeyCert([]string{"spiffe://cluster.local/fake.test"}, 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +96,7 @@ func TestAgent(t *testing.T) {
 			ControlPlaneAuthPolicy: mesh.AuthenticationPolicy_MUTUAL_TLS,
 		}, &istioagent.AgentConfig{
 			// Enable proxy - off by default, will be XDS_LOCAL env in install.
-			LocalXDSGeneratorListenAddress: "127.0.0.1:15002",
+			LocalXDSAddr: "127.0.0.1:15002",
 		}, &security.Options{
 			PilotCertProvider: "custom",
 			ClusterID:         "kubernetes",
@@ -109,37 +106,29 @@ func TestAgent(t *testing.T) {
 		// TODO: add a test for cert-based config.
 		// TODO: add a test for JWT-based ( using some mock OIDC in Istiod)
 		sa.WorkloadSecrets = creds
-		sa.RootCert = creds.RootCert
 		_, err = sa.Start(true, "test")
+
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// connect to the local XDS proxy - it's using a transient port.
-		ldsr, err := adsc.New(sa.GetLocalXDSGeneratorListener().Addr().String(),
+		ldsr, err := adsc.Dial(sa.LocalXDSListener.Addr().String(), "",
 			&adsc.Config{
 				IP:        "10.11.10.1",
 				Namespace: "test",
-				RootCert:  creds.RootCert,
-				InitialDiscoveryRequests: []*discovery.DiscoveryRequest{
-					{TypeUrl: v3.ClusterType},
-					{TypeUrl: collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String()},
-				},
+				Watch: []string{
+					v3.ClusterType,
+					collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String()},
 			})
 		if err != nil {
 			t.Fatal("Failed to connect", err)
 		}
 		defer ldsr.Close()
-		if err := ldsr.Run(); err != nil {
-			t.Fatal("ADSC: failed running ", err)
-		}
 
-		r, err := ldsr.WaitVersion(5*time.Second, collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String(), "")
+		_, err = ldsr.WaitVersion(5*time.Second, collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String(), "")
 		if err != nil {
 			t.Fatal(err)
-		}
-		if len(r.Resources) == 0 {
-			t.Fatalf("Got no resources")
 		}
 	})
 
@@ -152,16 +141,15 @@ func TestAgent(t *testing.T) {
 // testAdscTLS tests that ADSC helper can connect using TLS to Istiod
 func testAdscTLS(t *testing.T, creds security.SecretManager) {
 	// connect to the local XDS proxy - it's using a transient port.
-	ldsr, err := adsc.New(util.MockPilotSGrpcAddr,
+	ldsr, err := adsc.Dial(util.MockPilotSGrpcAddr, "",
 		&adsc.Config{
-			IP:            "10.11.10.1",
-			Namespace:     "test",
-			SecretManager: creds,
-			InitialDiscoveryRequests: []*discovery.DiscoveryRequest{
-				{TypeUrl: v3.ClusterType},
-				{TypeUrl: xds.TypeURLConnections},
-				{TypeUrl: collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String()},
-			},
+			IP:        "10.11.10.1",
+			Namespace: "test",
+			Secrets:   creds,
+			Watch: []string{
+				v3.ClusterType,
+				xds.TypeURLConnections,
+				collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String()},
 		})
 	if err != nil {
 		t.Fatal("Failed to connect", err)
@@ -170,20 +158,21 @@ func testAdscTLS(t *testing.T, creds security.SecretManager) {
 }
 
 func TestInternalEvents(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+	_, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
 
-	ads := s.Connect(
-		&model.Proxy{
-			Metadata: &model.NodeMetadata{
-				Generator: "event",
-			},
-		},
-		[]string{xds.TypeURLConnections},
-		[]string{},
-	)
-	defer ads.Close()
+	ldsr, close1, err := connectADSC(util.MockPilotGrpcAddr, &adsc.Config{
+		Watch: []string{xds.TypeURLConnections},
+		Meta: model.NodeMetadata{
+			Generator: "event",
+		}.ToStruct(),
+	})
+	if err != nil {
+		t.Fatal("Failed to connect", err)
+	}
+	defer close1()
 
-	dr, err := ads.WaitVersion(5*time.Second, xds.TypeURLConnections, "")
+	dr, err := ldsr.WaitVersion(5*time.Second, xds.TypeURLConnections, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,11 +181,17 @@ func TestInternalEvents(t *testing.T) {
 		t.Error("No data")
 	}
 
-	// Create a second connection - we should get an event.s
-	ads2 := s.Connect(nil, nil, nil)
-	defer ads2.Close()
+	// Create a second connection - we should get an event.
+	_, close2, err := connectADSC(util.MockPilotGrpcAddr, &adsc.Config{
+		Watch: []string{v3.ClusterType},
+	})
+	if err != nil {
+		t.Fatal("Failed to connect", err)
+	}
+	defer close2()
 
-	dr, err = ads.WaitVersion(5*time.Second, xds.TypeURLConnections,
+	//
+	dr, err = ldsr.WaitVersion(5*time.Second, xds.TypeURLConnections,
 		dr.VersionInfo)
 	if err != nil {
 		t.Fatal(err)
@@ -209,160 +204,268 @@ func TestInternalEvents(t *testing.T) {
 }
 
 func TestAdsReconnectAfterRestart(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
-	err := sendEDSReq([]string{"fake-cluster"}, sidecarID(app3Ip, "app3"), "", "", adscon)
+	_, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := adsReceive(adscon, 15*time.Second)
+	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res == nil {
-		t.Fatal("Expected EDS response, but go nil")
-	}
-	if len(res.Resources) != 1 || res.TypeUrl != v3.EndpointType {
-		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), res.TypeUrl)
-	}
-
-	// Close the connection and reconnect
-	_ = adscon.CloseSend()
-	adscon = s.ConnectADS()
-
-	// Reconnect with the same resources
-	err = sendEDSReq([]string{"fake-cluster"}, sidecarID(app3Ip, "app3"), res.VersionInfo, res.Nonce, adscon)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err = adsReceive(adscon, 15*time.Second)
+	res, err := adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res == nil {
 		t.Fatal("Expected EDS response, but go nil")
 	}
-	if len(res.Resources) != 1 || res.TypeUrl != v3.EndpointType {
-		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), res.TypeUrl)
+	if len(res.Resources) != 1 || v3.GetShortType(res.TypeUrl) != v3.EndpointShortType {
+		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), v3.GetShortType(res.TypeUrl))
 	}
-}
 
-func TestAdsUnsubscribe(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
-	err := sendEDSReq([]string{"fake-cluster"}, sidecarID(app3Ip, "app3"), "", "", adscon)
+	// Close the connection.
+	cancel()
+
+	edsstr, cancel, err = connectADS(util.MockPilotGrpcAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := adsReceive(adscon, 15*time.Second)
+	defer cancel()
+
+	// Connect with empty resources.
+	err = sendEDSReq([]string{}, sidecarID(app3Ip, "app3"), res.VersionInfo, res.Nonce, edsstr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res == nil {
 		t.Fatal("Expected EDS response, but go nil")
 	}
-	if len(res.Resources) != 1 || res.TypeUrl != v3.EndpointType {
-		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), res.TypeUrl)
-	}
-
-	// send empty resources
-	err = sendEDSReq([]string{}, sidecarID(app3Ip, "app3"), res.VersionInfo, res.Nonce, adscon)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// We should get no response
-	_, err = adsReceive(adscon, 250*time.Millisecond)
-	if err == nil || err.Error() != "EOF" {
-		t.Fatalf("got unexpected error: %v", err)
+	if len(res.Resources) != 0 || v3.GetShortType(res.TypeUrl) != v3.EndpointShortType {
+		t.Fatalf("Expected zero EDS resource, but got %v %s resources", len(res.Resources), v3.GetShortType(res.TypeUrl))
 	}
 }
 
 // Regression for envoy restart and overlapping connections
 func TestAdsReconnectWithNonce(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
-	err := sendEDSReq([]string{"fake-cluster"}, sidecarID(app3Ip, "app3"), "", "", adscon)
+	_, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := adsReceive(adscon, 15*time.Second)
+	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), "", "", edsstr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// closes old process and reconnect
-	_ = adscon.CloseSend()
-	adscon = s.ConnectADS()
+	// closes old process
+	cancel()
 
-	err = sendEDSReqReconnect([]string{"fake-cluster"}, adscon, res)
+	edsstr, cancel, err = connectADS(util.MockPilotGrpcAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = sendEDSReq([]string{"fake-cluster"}, sidecarID(app3Ip, "app3"), "", "", adscon)
+	defer cancel()
+
+	err = sendEDSReqReconnect([]string{"outbound|1080||service3.default.svc.cluster.local"}, edsstr, res)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, _ = adsReceive(adscon, 15*time.Second)
+	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), "", "", edsstr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _ = adsReceive(edsstr, 15*time.Second)
 
 	if res == nil {
 		t.Fatal("Expected EDS response, but go nil")
 	}
-	if len(res.Resources) != 1 || res.TypeUrl != v3.EndpointType {
-		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), res.TypeUrl)
+	if len(res.Resources) != 1 || v3.GetShortType(res.TypeUrl) != v3.EndpointShortType {
+		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), v3.GetShortType(res.TypeUrl))
 	}
 }
 
 // Regression for envoy restart and overlapping connections
 func TestAdsReconnect(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
-	err := sendCDSReq(sidecarID(app3Ip, "app3"), adscon)
+	s, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
+
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sendCDSReq(sidecarID(app3Ip, "app3"), edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, _ = adsReceive(adscon, 15*time.Second)
+	_, _ = adsReceive(edsstr, 15*time.Second)
 
 	// envoy restarts and reconnects
-	adscon2 := s.ConnectADS()
-	err = sendCDSReq(sidecarID(app3Ip, "app3"), adscon2)
+	edsstr2, cancel2, err := connectADS(util.MockPilotGrpcAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = adsReceive(adscon2, 15*time.Second)
+	defer cancel2()
+	err = sendCDSReq(sidecarID(app3Ip, "app3"), edsstr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = adsReceive(edsstr2, 15*time.Second)
 
 	// closes old process
-	adscon.CloseSend()
+	cancel()
 
 	time.Sleep(1 * time.Second)
 
 	// event happens
-	xds.AdsPushAll(s.Discovery)
+	xds.AdsPushAll(s.EnvoyXdsServer)
 
-	m, err := adsReceive(adscon2, 3*time.Second)
+	m, err := adsReceive(edsstr2, 3*time.Second)
 	if err != nil {
 		t.Fatal("Recv failed", err)
 	}
 	if m == nil {
 		t.Fatal("Expected CDS response, but go nil")
 	}
-	if len(m.Resources) == 0 || m.TypeUrl != v3.ClusterType {
-		t.Fatalf("Expected non zero CDS resources, but got %v %s resources", len(m.Resources), m.TypeUrl)
+	if len(m.Resources) == 0 || v3.GetShortType(m.TypeUrl) != v3.ClusterShortType {
+		t.Fatalf("Expected non zero CDS resources, but got %v %s resources", len(m.Resources), v3.GetShortType(m.TypeUrl))
 	}
 }
 
+func sendAndReceivev2(t *testing.T, node string, client AdsClientv2, typeURL string, errMsg string) *xdsapi.DiscoveryResponse {
+	if err := sendXdsv2(node, client, typeURL, errMsg); err != nil {
+		t.Fatal(err)
+	}
+	res, err := adsReceivev2(client, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func sendAndReceive(t *testing.T, node string, client AdsClient, typeURL string, errMsg string) *discovery.DiscoveryResponse {
+	if err := sendXds(node, client, typeURL, errMsg); err != nil {
+		t.Fatal(err)
+	}
+	res, err := adsReceive(client, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// xdsTest runs a given function with a local pilot environment. This is used to test the ADS handling.
+func xdsv2Test(t *testing.T, name string, fn func(t *testing.T, client AdsClientv2)) {
+	t.Run(name, func(t *testing.T) {
+		_, tearDown := initLocalPilotTestEnv(t)
+		defer tearDown()
+
+		client, cancel, err := connectADSv2(util.MockPilotGrpcAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cancel()
+		fn(t, client)
+	})
+}
+
+// xdsTest runs a given function with a local pilot environment. This is used to test the ADS handling.
+func xdsTest(t *testing.T, name string, fn func(t *testing.T, client AdsClient)) {
+	t.Run(name, func(t *testing.T) {
+		_, tearDown := initLocalPilotTestEnv(t)
+		defer tearDown()
+
+		client, cancel, err := connectADS(util.MockPilotGrpcAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cancel()
+		fn(t, client)
+	})
+}
+
+func TestAdsVersioning(t *testing.T) {
+	node := sidecarID(app3Ip, "app3")
+
+	xdsv2Test(t, "version mismatch", func(t *testing.T, client AdsClientv2) {
+		// Send a v2 CDS request, expect v2 response
+		res := sendAndReceivev2(t, node, client, v2.ClusterType, "")
+		if res.TypeUrl != v2.ClusterType {
+			t.Fatalf("expected type %v, got %v", v2.ClusterType, res.TypeUrl)
+		}
+
+		// Follow up with a v3 CDS request - this is an error. A client should be consistent
+		if err := sendXdsv2(node, client, v3.ClusterType, ""); err != nil {
+			t.Fatal(err)
+		}
+		res, err := adsReceivev2(client, 15*time.Second)
+		if err == nil {
+			t.Fatalf("expected an error because we sent a different version, got no error: %v", res)
+		}
+	})
+
+	xdsv2Test(t, "send v2", func(t *testing.T, client AdsClientv2) {
+		// Send v2 request, expect v2 response
+		res := sendAndReceivev2(t, node, client, v2.ClusterType, "")
+		if res.TypeUrl != v2.ClusterType {
+			t.Fatalf("expected type %v, got %v", v2.ClusterType, res.TypeUrl)
+		}
+	})
+
+	xdsv2Test(t, "send v3", func(t *testing.T, client AdsClientv2) {
+		// Send v3 request, expect v3 response
+		res := sendAndReceivev2(t, node, client, v3.ClusterType, "")
+		if res.TypeUrl != v3.ClusterType {
+			t.Fatalf("expected type %v, got %v", v3.ClusterType, res.TypeUrl)
+		}
+	})
+
+	xdsTest(t, "send v2 with v3 transport", func(t *testing.T, client AdsClient) {
+		// Send v2 request, expect v2 response
+		res := sendAndReceive(t, node, client, v2.ClusterType, "")
+		if res.TypeUrl != v2.ClusterType {
+			t.Fatalf("expected type %v, got %v", v2.ClusterType, res.TypeUrl)
+		}
+	})
+
+	xdsTest(t, "send v3 with v3 transport", func(t *testing.T, client AdsClient) {
+		// Send v3 request, expect v3 response
+		res := sendAndReceive(t, node, client, v3.ClusterType, "")
+		if res.TypeUrl != v3.ClusterType {
+			t.Fatalf("expected type %v, got %v", v3.ClusterType, res.TypeUrl)
+		}
+	})
+}
+
 func TestAdsClusterUpdate(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
+	_, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
+
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
 
 	version := ""
 	nonce := ""
 	var sendEDSReqAndVerify = func(clusterName string) {
-		err := sendEDSReq([]string{clusterName}, sidecarID("1.1.1.1", "app3"), version, nonce, adscon)
+		err = sendEDSReq([]string{clusterName}, sidecarID("1.1.1.1", "app3"), version, nonce, edsstr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		res, err := adsReceive(adscon, 15*time.Second)
+		res, err := adsReceive(edsstr, 15*time.Second)
 		version = res.VersionInfo
 		nonce = res.Nonce
 		if err != nil {
@@ -393,7 +496,12 @@ func TestAdsClusterUpdate(t *testing.T) {
 
 // nolint: lll
 func TestAdsPushScoping(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+	server, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
+	features.EnableVirtualServiceDelegate = true
+	defer func() {
+		features.EnableVirtualServiceDelegate = false
+	}()
 
 	const (
 		svcSuffix = ".testPushScoping.com"
@@ -405,7 +513,7 @@ func TestAdsPushScoping(t *testing.T) {
 
 		for _, name := range names {
 			hostname := host.Name(name)
-			s.Discovery.MemRegistry.RemoveService(hostname)
+			server.EnvoyXdsServer.MemRegistry.RemoveService(hostname)
 			configsUpdated[model.ConfigKey{
 				Kind:      gvk.ServiceEntry,
 				Name:      string(hostname),
@@ -413,7 +521,7 @@ func TestAdsPushScoping(t *testing.T) {
 			}] = struct{}{}
 		}
 
-		s.Discovery.ConfigUpdate(&model.PushRequest{Full: true, ConfigsUpdated: configsUpdated})
+		server.EnvoyXdsServer.ConfigUpdate(&model.PushRequest{Full: true, ConfigsUpdated: configsUpdated})
 
 	}
 	removeService := func(ns string, indexes ...int) {
@@ -436,7 +544,7 @@ func TestAdsPushScoping(t *testing.T) {
 				Namespace: ns,
 			}] = struct{}{}
 
-			s.Discovery.MemRegistry.AddService(hostname, &model.Service{
+			server.EnvoyXdsServer.MemRegistry.AddService(hostname, &model.Service{
 				Hostname: hostname,
 				Address:  "10.11.0.1",
 				Ports: []*model.Port{
@@ -452,7 +560,7 @@ func TestAdsPushScoping(t *testing.T) {
 			})
 		}
 
-		s.Discovery.ConfigUpdate(&model.PushRequest{Full: true, ConfigsUpdated: configsUpdated})
+		server.EnvoyXdsServer.ConfigUpdate(&model.PushRequest{Full: true, ConfigsUpdated: configsUpdated})
 	}
 	addService := func(ns string, indexes ...int) {
 		var hostnames []string
@@ -464,29 +572,26 @@ func TestAdsPushScoping(t *testing.T) {
 
 	addServiceInstance := func(hostname host.Name, indexes ...int) {
 		for _, i := range indexes {
-			s.Discovery.MemRegistry.AddEndpoint(hostname, "http-main", 2080, "192.168.1.10", i)
+			server.EnvoyXdsServer.MemRegistry.AddEndpoint(hostname, "http-main", 2080, "192.168.1.10", i)
 		}
 
-		s.Discovery.ConfigUpdate(&model.PushRequest{Full: false, ConfigsUpdated: map[model.ConfigKey]struct{}{
+		server.EnvoyXdsServer.ConfigUpdate(&model.PushRequest{Full: false, ConfigsUpdated: map[model.ConfigKey]struct{}{
 			{Kind: gvk.ServiceEntry, Name: string(hostname), Namespace: model.IstioDefaultConfigNamespace}: {},
 		}})
 	}
 
-	addVirtualService := func(i int, hosts []string, dest string) {
-		if _, err := s.Store().Create(config.Config{
-			Meta: config.Meta{
+	addVirtualService := func(i int, hosts ...string) {
+		if _, err := server.EnvoyXdsServer.MemConfigController.Create(model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.VirtualService,
 				Name:             fmt.Sprintf("vs%d", i), Namespace: model.IstioDefaultConfigNamespace},
 			Spec: &networking.VirtualService{
 				Hosts: hosts,
-				Http: []*networking.HTTPRoute{{
-					Name: "dest-foo",
-					Route: []*networking.HTTPRouteDestination{{
-						Destination: &networking.Destination{
-							Host: dest,
-						},
-					}},
-				}},
+				Http: []*networking.HTTPRoute{{Redirect: &networking.HTTPRedirect{
+					Uri:          "example.org",
+					Authority:    "some-authority.default.svc.cluster.local",
+					RedirectCode: 308,
+				}}},
 				ExportTo: nil,
 			},
 		}); err != nil {
@@ -494,17 +599,16 @@ func TestAdsPushScoping(t *testing.T) {
 		}
 	}
 	removeVirtualService := func(i int) {
-		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("vs%d", i), model.IstioDefaultConfigNamespace)
+		server.EnvoyXdsServer.MemConfigController.Delete(gvk.VirtualService, fmt.Sprintf("vs%d", i), model.IstioDefaultConfigNamespace)
 	}
 
-	addDelegateVirtualService := func(i int, hosts []string, dest string) {
-		if _, err := s.Store().Create(config.Config{
-			Meta: config.Meta{
+	addDelegateVirtualService := func(i int, hosts []string) {
+		if _, err := server.EnvoyXdsServer.MemConfigController.Create(model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.VirtualService,
 				Name:             fmt.Sprintf("rootvs%d", i), Namespace: model.IstioDefaultConfigNamespace},
 			Spec: &networking.VirtualService{
 				Hosts: hosts,
-
 				Http: []*networking.HTTPRoute{{
 					Name: "dest-foo",
 					Delegate: &networking.Delegate{
@@ -518,19 +622,16 @@ func TestAdsPushScoping(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := s.Store().Create(config.Config{
-			Meta: config.Meta{
+		if _, err := server.EnvoyXdsServer.MemConfigController.Create(model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.VirtualService,
 				Name:             fmt.Sprintf("delegatevs%d", i), Namespace: model.IstioDefaultConfigNamespace},
 			Spec: &networking.VirtualService{
-				Http: []*networking.HTTPRoute{{
-					Name: "dest-foo",
-					Route: []*networking.HTTPRouteDestination{{
-						Destination: &networking.Destination{
-							Host: dest,
-						},
-					}},
-				}},
+				Http: []*networking.HTTPRoute{{Redirect: &networking.HTTPRedirect{
+					Uri:          "example.org",
+					Authority:    "some-authority.default.svc.cluster.local",
+					RedirectCode: 308,
+				}}},
 				ExportTo: nil,
 			},
 		}); err != nil {
@@ -538,27 +639,17 @@ func TestAdsPushScoping(t *testing.T) {
 		}
 	}
 
-	updateDelegateVirtualService := func(i int, dest string) {
-		if _, err := s.Store().Update(config.Config{
-			Meta: config.Meta{
+	updateDelegateVirtualService := func(i int) {
+		if _, err := server.EnvoyXdsServer.MemConfigController.Update(model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.VirtualService,
 				Name:             fmt.Sprintf("delegatevs%d", i), Namespace: model.IstioDefaultConfigNamespace},
 			Spec: &networking.VirtualService{
-				Http: []*networking.HTTPRoute{{
-					Name: "dest-foo",
-					Headers: &networking.Headers{
-						Request: &networking.Headers_HeaderOperations{
-							Remove: []string{"any-string"},
-						},
-					},
-					Route: []*networking.HTTPRouteDestination{
-						{
-							Destination: &networking.Destination{
-								Host: dest,
-							},
-						},
-					},
-				}},
+				Http: []*networking.HTTPRoute{{Redirect: &networking.HTTPRedirect{
+					Uri:          "example.org",
+					Authority:    "new-authority.default.svc.cluster.local",
+					RedirectCode: 308,
+				}}},
 				ExportTo: nil,
 			},
 		}); err != nil {
@@ -567,13 +658,13 @@ func TestAdsPushScoping(t *testing.T) {
 	}
 
 	removeDelegateVirtualService := func(i int) {
-		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("rootvs%d", i), model.IstioDefaultConfigNamespace)
-		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("delegatevs%d", i), model.IstioDefaultConfigNamespace)
+		server.EnvoyXdsServer.MemConfigController.Delete(gvk.VirtualService, fmt.Sprintf("rootvs%d", i), model.IstioDefaultConfigNamespace)
+		server.EnvoyXdsServer.MemConfigController.Delete(gvk.VirtualService, fmt.Sprintf("delegatevs%d", i), model.IstioDefaultConfigNamespace)
 	}
 
 	addDestinationRule := func(i int, host string) {
-		if _, err := s.Store().Create(config.Config{
-			Meta: config.Meta{
+		if _, err := server.EnvoyXdsServer.MemConfigController.Create(model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.DestinationRule,
 				Name:             fmt.Sprintf("dr%d", i), Namespace: model.IstioDefaultConfigNamespace},
 			Spec: &networking.DestinationRule{
@@ -585,7 +676,7 @@ func TestAdsPushScoping(t *testing.T) {
 		}
 	}
 	removeDestinationRule := func(i int) {
-		s.Store().Delete(gvk.DestinationRule, fmt.Sprintf("dr%d", i), model.IstioDefaultConfigNamespace)
+		server.EnvoyXdsServer.MemConfigController.Delete(gvk.DestinationRule, fmt.Sprintf("dr%d", i), model.IstioDefaultConfigNamespace)
 	}
 
 	sc := &networking.Sidecar{
@@ -595,8 +686,8 @@ func TestAdsPushScoping(t *testing.T) {
 			},
 		},
 	}
-	if _, err := s.Store().Create(config.Config{
-		Meta: config.Meta{
+	if _, err := server.EnvoyXdsServer.MemConfigController.Create(model.Config{
+		ConfigMeta: model.ConfigMeta{
 			GroupVersionKind: gvk.Sidecar,
 			Name:             "sc", Namespace: model.IstioDefaultConfigNamespace},
 		Spec: sc,
@@ -605,7 +696,7 @@ func TestAdsPushScoping(t *testing.T) {
 	}
 	addService(model.IstioDefaultConfigNamespace, 1, 2, 3)
 
-	adscConn := s.Connect(nil, nil, nil)
+	adscConn := adsConnectAndWait(t, 0x0a0a0a0a)
 	defer adscConn.Close()
 	type svcCase struct {
 		desc string
@@ -621,17 +712,17 @@ func TestAdsPushScoping(t *testing.T) {
 		vsIndexes []struct {
 			index int
 			hosts []string
-			dest  string
 		}
 		delegatevsIndexes []struct {
 			index int
 			hosts []string
-			dest  string
 		}
 		drIndexes []struct {
 			index int
 			host  string
 		}
+
+		timeout time.Duration
 
 		expectUpdates   []string
 		unexpectUpdates []string
@@ -642,7 +733,7 @@ func TestAdsPushScoping(t *testing.T) {
 			ev:            model.EventAdd,
 			svcIndexes:    []int{4},
 			ns:            model.IstioDefaultConfigNamespace,
-			expectUpdates: []string{v3.ListenerType},
+			expectUpdates: []string{"lds"},
 		}, // then: default 1,2,3,4
 		{
 			desc: "Add instances to a scoped service",
@@ -652,7 +743,7 @@ func TestAdsPushScoping(t *testing.T) {
 				indexes []int
 			}{{fmt.Sprintf("svc%d%s", 4, svcSuffix), []int{1, 2}}},
 			ns:            model.IstioDefaultConfigNamespace,
-			expectUpdates: []string{v3.EndpointType},
+			expectUpdates: []string{"eds"},
 		}, // then: default 1,2,3,4
 		{
 			desc: "Add virtual service to a scoped service",
@@ -660,9 +751,8 @@ func TestAdsPushScoping(t *testing.T) {
 			vsIndexes: []struct {
 				index int
 				hosts []string
-				dest  string
-			}{{index: 4, hosts: []string{fmt.Sprintf("svc%d%s", 4, svcSuffix)}, dest: "unknown-svc"}},
-			expectUpdates: []string{v3.ListenerType},
+			}{{4, []string{fmt.Sprintf("svc%d%s", 4, svcSuffix)}}},
+			expectUpdates: []string{"lds"},
 		},
 		{
 			desc: "Delete virtual service of a scoped service",
@@ -670,9 +760,8 @@ func TestAdsPushScoping(t *testing.T) {
 			vsIndexes: []struct {
 				index int
 				hosts []string
-				dest  string
 			}{{index: 4}},
-			expectUpdates: []string{v3.ListenerType},
+			expectUpdates: []string{"lds"},
 		},
 		{
 			desc: "Add destination rule to a scoped service",
@@ -681,7 +770,7 @@ func TestAdsPushScoping(t *testing.T) {
 				index int
 				host  string
 			}{{4, fmt.Sprintf("svc%d%s", 4, svcSuffix)}},
-			expectUpdates: []string{v3.ClusterType},
+			expectUpdates: []string{"cds"},
 		},
 		{
 			desc: "Delete destination rule of a scoped service",
@@ -689,15 +778,16 @@ func TestAdsPushScoping(t *testing.T) {
 			drIndexes: []struct {
 				index int
 				host  string
-			}{{index: 4}},
-			expectUpdates: []string{v3.ClusterType},
+			}{{4, fmt.Sprintf("svc%d%s", 4, svcSuffix)}},
+			expectUpdates: []string{"cds"},
 		},
 		{
 			desc:            "Add a unscoped(name not match) service",
 			ev:              model.EventAdd,
 			svcNames:        []string{"foo.com"},
 			ns:              model.IstioDefaultConfigNamespace,
-			unexpectUpdates: []string{v3.ClusterType},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		}, // then: default 1,2,3,4, foo.com; ns1: 11
 		{
 			desc: "Add instances to an unscoped service",
@@ -707,14 +797,16 @@ func TestAdsPushScoping(t *testing.T) {
 				indexes []int
 			}{{"foo.com", []int{1, 2}}},
 			ns:              model.IstioDefaultConfigNamespace,
-			unexpectUpdates: []string{v3.EndpointType},
+			unexpectUpdates: []string{"eds"},
+			timeout:         time.Second,
 		}, // then: default 1,2,3,4
 		{
 			desc:            "Add a unscoped(ns not match) service",
 			ev:              model.EventAdd,
 			svcIndexes:      []int{11},
 			ns:              ns1,
-			unexpectUpdates: []string{v3.ClusterType},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		}, // then: default 1,2,3,4, foo.com; ns1: 11
 		{
 			desc: "Add virtual service to an unscoped service",
@@ -722,9 +814,9 @@ func TestAdsPushScoping(t *testing.T) {
 			vsIndexes: []struct {
 				index int
 				hosts []string
-				dest  string
-			}{{index: 0, hosts: []string{"foo.com"}, dest: "unknown-service"}},
-			unexpectUpdates: []string{v3.ClusterType},
+			}{{0, []string{"foo.com"}}},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		},
 		{
 			desc: "Delete virtual service of a unscoped service",
@@ -732,9 +824,9 @@ func TestAdsPushScoping(t *testing.T) {
 			vsIndexes: []struct {
 				index int
 				hosts []string
-				dest  string
 			}{{index: 0}},
-			unexpectUpdates: []string{v3.ClusterType},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		},
 		{
 			desc: "Add destination rule to an unscoped service",
@@ -743,7 +835,8 @@ func TestAdsPushScoping(t *testing.T) {
 				index int
 				host  string
 			}{{0, "foo.com"}},
-			unexpectUpdates: []string{v3.ClusterType},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		},
 		{
 			desc: "Delete destination rule of a unscoped service",
@@ -752,37 +845,8 @@ func TestAdsPushScoping(t *testing.T) {
 				index int
 				host  string
 			}{{index: 0}},
-			unexpectUpdates: []string{v3.ClusterType},
-		},
-		{
-			desc: "Add virtual service for scoped service with transitively scoped dest svc",
-			ev:   model.EventAdd,
-			vsIndexes: []struct {
-				index int
-				hosts []string
-				dest  string
-			}{{index: 4, hosts: []string{fmt.Sprintf("svc%d%s", 4, svcSuffix)}, dest: "foo.com"}},
-			expectUpdates: []string{v3.ClusterType, v3.EndpointType},
-		},
-		{
-			desc: "Add instances for transitively scoped svc",
-			ev:   model.EventAdd,
-			instIndexes: []struct {
-				name    string
-				indexes []int
-			}{{"foo.com", []int{1, 2}}},
-			ns:            model.IstioDefaultConfigNamespace,
-			expectUpdates: []string{v3.EndpointType},
-		},
-		{
-			desc: "Delete virtual service for scoped service with transitively scoped dest svc",
-			ev:   model.EventDelete,
-			vsIndexes: []struct {
-				index int
-				hosts []string
-				dest  string
-			}{{index: 4}},
-			expectUpdates: []string{v3.ClusterType},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		},
 		{
 			desc: "Add delegation virtual service for scoped service with transitively scoped dest svc",
@@ -790,9 +854,8 @@ func TestAdsPushScoping(t *testing.T) {
 			delegatevsIndexes: []struct {
 				index int
 				hosts []string
-				dest  string
-			}{{index: 4, hosts: []string{fmt.Sprintf("svc%d%s", 4, svcSuffix)}, dest: "foo.com"}},
-			expectUpdates: []string{v3.ListenerType, v3.RouteType, v3.ClusterType, v3.EndpointType},
+			}{{index: 4, hosts: []string{fmt.Sprintf("svc%d%s", 4, svcSuffix)}}},
+			expectUpdates: []string{"lds", "rds"},
 		},
 		{
 			desc: "Update delegate virtual service should trigger full push",
@@ -800,9 +863,8 @@ func TestAdsPushScoping(t *testing.T) {
 			delegatevsIndexes: []struct {
 				index int
 				hosts []string
-				dest  string
-			}{{index: 4, hosts: []string{fmt.Sprintf("svc%d%s", 4, svcSuffix)}, dest: "foo.com"}},
-			expectUpdates: []string{v3.ListenerType, v3.RouteType, v3.ClusterType},
+			}{{index: 4, hosts: []string{fmt.Sprintf("svc%d%s", 4, svcSuffix)}}},
+			expectUpdates: []string{"lds", "rds"},
 		},
 		{
 			desc: "Delete delegate virtual service for scoped service with transitively scoped dest svc",
@@ -810,123 +872,131 @@ func TestAdsPushScoping(t *testing.T) {
 			delegatevsIndexes: []struct {
 				index int
 				hosts []string
-				dest  string
 			}{{index: 4}},
-			expectUpdates: []string{v3.ListenerType, v3.RouteType, v3.ClusterType},
+			expectUpdates: []string{"lds", "rds"},
 		},
 		{
 			desc:          "Remove a scoped service",
 			ev:            model.EventDelete,
 			svcIndexes:    []int{4},
 			ns:            model.IstioDefaultConfigNamespace,
-			expectUpdates: []string{v3.ListenerType},
+			expectUpdates: []string{"lds"},
 		}, // then: default 1,2,3, foo.com; ns: 11
 		{
 			desc:            "Remove a unscoped(name not match) service",
 			ev:              model.EventDelete,
 			svcNames:        []string{"foo.com"},
 			ns:              model.IstioDefaultConfigNamespace,
-			unexpectUpdates: []string{v3.ClusterType},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		}, // then: default 1,2,3; ns1: 11
 		{
 			desc:            "Remove a unscoped(ns not match) service",
 			ev:              model.EventDelete,
 			svcIndexes:      []int{11},
 			ns:              ns1,
-			unexpectUpdates: []string{v3.ClusterType},
+			unexpectUpdates: []string{"cds"},
+			timeout:         time.Second,
 		}, // then: default 1,2,3
 	}
 
-	for _, c := range svcCases {
-		t.Run(c.desc, func(t *testing.T) {
-			// Let events from previous tests complete
-			time.Sleep(time.Millisecond * 100)
-			adscConn.WaitClear()
-			var wantUpdates []string
-			wantUpdates = append(wantUpdates, c.expectUpdates...)
-			wantUpdates = append(wantUpdates, c.unexpectUpdates...)
-
-			switch c.ev {
-			case model.EventAdd:
-				if len(c.svcIndexes) > 0 {
-					addService(c.ns, c.svcIndexes...)
+	for i, c := range svcCases {
+		fmt.Printf("begin %d case(%s) %v\n", i, c.desc, c)
+		var wantUpdates []string
+		wantUpdates = append(wantUpdates, c.expectUpdates...)
+		wantUpdates = append(wantUpdates, c.unexpectUpdates...)
+		switch c.ev {
+		case model.EventAdd:
+			if len(c.svcIndexes) > 0 {
+				addService(c.ns, c.svcIndexes...)
+			}
+			if len(c.svcNames) > 0 {
+				addServiceByNames(c.ns, c.svcNames...)
+			}
+			if len(c.instIndexes) > 0 {
+				for _, instIndex := range c.instIndexes {
+					addServiceInstance(host.Name(instIndex.name), instIndex.indexes...)
 				}
-				if len(c.svcNames) > 0 {
-					addServiceByNames(c.ns, c.svcNames...)
+			}
+			if len(c.vsIndexes) > 0 {
+				for _, vsIndex := range c.vsIndexes {
+					addVirtualService(vsIndex.index, vsIndex.hosts...)
 				}
-				if len(c.instIndexes) > 0 {
-					for _, instIndex := range c.instIndexes {
-						addServiceInstance(host.Name(instIndex.name), instIndex.indexes...)
-					}
+			}
+			if len(c.delegatevsIndexes) > 0 {
+				for _, vsIndex := range c.delegatevsIndexes {
+					addDelegateVirtualService(vsIndex.index, vsIndex.hosts)
 				}
-				if len(c.vsIndexes) > 0 {
-					for _, vsIndex := range c.vsIndexes {
-						addVirtualService(vsIndex.index, vsIndex.hosts, vsIndex.dest)
-					}
+			}
+			if len(c.drIndexes) > 0 {
+				for _, drIndex := range c.drIndexes {
+					addDestinationRule(drIndex.index, drIndex.host)
 				}
-				if len(c.delegatevsIndexes) > 0 {
-					for _, vsIndex := range c.delegatevsIndexes {
-						addDelegateVirtualService(vsIndex.index, vsIndex.hosts, vsIndex.dest)
-					}
+			}
+		case model.EventUpdate:
+			if len(c.delegatevsIndexes) > 0 {
+				for _, vsIndex := range c.delegatevsIndexes {
+					updateDelegateVirtualService(vsIndex.index)
 				}
-				if len(c.drIndexes) > 0 {
-					for _, drIndex := range c.drIndexes {
-						addDestinationRule(drIndex.index, drIndex.host)
-					}
+			}
+		case model.EventDelete:
+			if len(c.svcIndexes) > 0 {
+				removeService(c.ns, c.svcIndexes...)
+			}
+			if len(c.svcNames) > 0 {
+				removeServiceByNames(c.ns, c.svcNames...)
+			}
+			if len(c.vsIndexes) > 0 {
+				for _, vsIndex := range c.vsIndexes {
+					removeVirtualService(vsIndex.index)
 				}
-			case model.EventUpdate:
-				if len(c.delegatevsIndexes) > 0 {
-					for _, vsIndex := range c.delegatevsIndexes {
-						updateDelegateVirtualService(vsIndex.index, vsIndex.dest)
-					}
+			}
+			if len(c.delegatevsIndexes) > 0 {
+				for _, vsIndex := range c.delegatevsIndexes {
+					removeDelegateVirtualService(vsIndex.index)
 				}
-			case model.EventDelete:
-				if len(c.svcIndexes) > 0 {
-					removeService(c.ns, c.svcIndexes...)
-				}
-				if len(c.svcNames) > 0 {
-					removeServiceByNames(c.ns, c.svcNames...)
-				}
-				if len(c.vsIndexes) > 0 {
-					for _, vsIndex := range c.vsIndexes {
-						removeVirtualService(vsIndex.index)
-					}
-				}
-				if len(c.delegatevsIndexes) > 0 {
-					for _, vsIndex := range c.delegatevsIndexes {
-						removeDelegateVirtualService(vsIndex.index)
-					}
-				}
-				if len(c.drIndexes) > 0 {
-					for _, drIndex := range c.drIndexes {
-						removeDestinationRule(drIndex.index)
-					}
-				}
-			default:
-				t.Fatalf("wrong event for case %v", c)
 			}
 
-			timeout := time.Second
-			upd, _ := adscConn.Wait(timeout, wantUpdates...) // XXX slow for unexpect ...
-			for _, expect := range c.expectUpdates {
-				if !contains(upd, expect) {
-					t.Fatalf("expected update %s not in updates %v", expect, upd)
+			if len(c.drIndexes) > 0 {
+				for _, drIndex := range c.drIndexes {
+					removeDestinationRule(drIndex.index)
 				}
 			}
-			for _, unexpect := range c.unexpectUpdates {
-				if contains(upd, unexpect) {
-					t.Fatalf("expected to not get update %s, but it is in updates %v", unexpect, upd)
-				}
+		default:
+			t.Fatalf("wrong event for case %v", c)
+		}
+
+		time.Sleep(200 * time.Millisecond)
+		timeout := 5 * time.Second
+		if c.timeout > 0 {
+			timeout = c.timeout
+		}
+		upd, _ := adscConn.Wait(timeout, wantUpdates...) // XXX slow for unexpect ...
+
+		for _, expect := range c.expectUpdates {
+			if !contains(upd, expect) {
+				t.Fatalf("expect %s but not contains (%v) for case %v", expect, upd, c.desc)
 			}
-		})
+		}
+		for _, unexpect := range c.unexpectUpdates {
+			if contains(upd, unexpect) {
+				t.Fatalf("unexpect %s but contains (%v) for case %v", unexpect, upd, c.desc)
+			}
+		}
 	}
 }
 
 func TestAdsUpdate(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
+	server, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
 
-	s.Discovery.MemRegistry.AddService("adsupdate.default.svc.cluster.local", &model.Service{
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+
+	server.EnvoyXdsServer.MemRegistry.AddService("adsupdate.default.svc.cluster.local", &model.Service{
 		Hostname: "adsupdate.default.svc.cluster.local",
 		Address:  "10.11.0.1",
 		Ports: []*model.Port{
@@ -941,17 +1011,17 @@ func TestAdsUpdate(t *testing.T) {
 			Namespace: "default",
 		},
 	})
-	s.Discovery.ConfigUpdate(&model.PushRequest{Full: true})
+	server.EnvoyXdsServer.ConfigUpdate(&model.PushRequest{Full: true})
 	time.Sleep(time.Millisecond * 200)
-	s.Discovery.MemRegistry.SetEndpoints("adsupdate.default.svc.cluster.local", "default",
+	server.EnvoyXdsServer.MemRegistry.SetEndpoints("adsupdate.default.svc.cluster.local", "default",
 		newEndpointWithAccount("10.2.0.1", "hello-sa", "v1"))
 
-	err := sendEDSReq([]string{"outbound|2080||adsupdate.default.svc.cluster.local"}, sidecarID("1.1.1.1", "app3"), "", "", adscon)
+	err = sendEDSReq([]string{"outbound|2080||adsupdate.default.svc.cluster.local"}, sidecarID("1.1.1.1", "app3"), "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	res1, err := adsReceive(adscon, 15*time.Second)
+	res1, err := adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal("Recv failed", err)
 	}
@@ -979,14 +1049,14 @@ func TestAdsUpdate(t *testing.T) {
 		t.Error("Expecting 10.2.0.1 got ", lbe[0].GetEndpoint().Address.GetSocketAddress().Address)
 	}
 
-	_ = s.Discovery.MemRegistry.AddEndpoint("adsupdate.default.svc.cluster.local",
+	_ = server.EnvoyXdsServer.MemRegistry.AddEndpoint("adsupdate.default.svc.cluster.local",
 		"http-main", 2080, "10.1.7.1", 1080)
 
 	// will trigger recompute and push for all clients - including some that may be closing
 	// This reproduced the 'push on closed connection' bug.
-	xds.AdsPushAll(s.Discovery)
+	xds.AdsPushAll(server.EnvoyXdsServer)
 
-	res1, err = adsReceive(adscon, 15*time.Second)
+	res1, err = adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal("Recv2 failed", err)
 	}
@@ -1003,68 +1073,82 @@ func TestAdsUpdate(t *testing.T) {
 	}
 }
 
-func expectNoResponse(t test.Failer, c chan *discovery.DiscoveryResponse) {
-	t.Helper()
-	select {
-	case <-time.After(time.Millisecond * 100):
-		return
-	case resp := <-c:
-		t.Fatalf("got unexpected response: %v", resp)
-	}
-}
-
-func expectNonEmptyResource(t test.Failer, c chan *discovery.DiscoveryResponse) *discovery.DiscoveryResponse {
-	t.Helper()
-	select {
-	case <-time.After(time.Second):
-		t.Fatalf("did not get response in time")
-	case resp := <-c:
-		if resp == nil || len(resp.Resources) == 0 {
-			t.Fatalf("got empty response")
-		}
-		return resp
-	}
-	return nil
-}
-
 func TestEnvoyRDSProtocolError(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
-	responses := make(chan *discovery.DiscoveryResponse)
-	go adsReceiveChannel(adscon, responses)
+	server, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
 
-	err := sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", adscon)
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectNonEmptyResource(t, responses)
-	xds.AdsPushAll(s.Discovery)
-	res := expectNonEmptyResource(t, responses)
+	defer cancel()
 
-	// send empty response and validate no response is returned.
-	err = sendRDSReq(gatewayID(gatewayIP), nil, res.VersionInfo, res.Nonce, adscon)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectNoResponse(t, responses)
+	res, err := adsReceive(edsstr, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || len(res.Resources) == 0 {
+		t.Fatal("No routes returned")
+	}
+
+	xds.AdsPushAll(server.EnvoyXdsServer)
+
+	res, err = adsReceive(edsstr, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || len(res.Resources) != 1 {
+		t.Fatal("No routes returned")
+	}
+
+	// send empty response and validate no routes are retuned.
+	err = sendRDSReq(gatewayID(gatewayIP), nil, res.VersionInfo, res.Nonce, edsstr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = adsReceive(edsstr, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || len(res.Resources) != 0 {
+		t.Fatalf("No routes expected but got routes %v", len(res.Resources))
+	}
 
 	// Refresh routes
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, res.VersionInfo, res.Nonce, adscon)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, res.VersionInfo, res.Nonce, edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectNonEmptyResource(t, responses)
+
+	res, err = adsReceive(edsstr, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if res == nil || len(res.Resources) == 0 {
+		t.Fatal("No routes after protocol error")
+	}
 }
 
 func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
-	adscon := s.ConnectADS()
+	server, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
 
-	err := sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", adscon)
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := adsReceive(adscon, 15*time.Second)
+	defer cancel()
+
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", edsstr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1079,9 +1163,9 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 		t.Fatal("Expected only the http.80 route to be returned")
 	}
 
-	xds.AdsPushAll(s.Discovery)
+	xds.AdsPushAll(server.EnvoyXdsServer)
 
-	res, err = adsReceive(adscon, 15*time.Second)
+	res, err = adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1097,11 +1181,11 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 	}
 
 	// Test update from A -> B
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeB}, "", "", adscon)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeB}, "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err = adsReceive(adscon, 15*time.Second)
+	res, err = adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1114,12 +1198,12 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 	}
 
 	// Test update from B -> A, B
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, res.VersionInfo, res.Nonce, adscon)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, res.VersionInfo, res.Nonce, edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	res, err = adsReceive(adscon, 15*time.Second)
+	res, err = adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1146,11 +1230,11 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 
 	// Test update from B, B -> A
 
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", adscon)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err = adsReceive(adscon, 15*time.Second)
+	res, err = adsReceive(edsstr, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1174,103 +1258,4 @@ func unmarshallRoute(value []byte) (*route.RouteConfiguration, error) {
 		return nil, err
 	}
 	return route, nil
-}
-
-func TestXdsCache(t *testing.T) {
-	makeEndpoint := func(addr []*networking.WorkloadEntry) config.Config {
-		return config.Config{
-			Meta: config.Meta{
-				Name:             "service",
-				Namespace:        "default",
-				GroupVersionKind: gvk.ServiceEntry,
-			},
-			Spec: &networking.ServiceEntry{
-				Hosts: []string{"foo.com"},
-				Ports: []*networking.Port{{
-					Number:   80,
-					Protocol: "HTTP",
-					Name:     "http",
-				}},
-				Resolution: networking.ServiceEntry_STATIC,
-				Endpoints:  addr,
-			},
-		}
-	}
-	assertEndpoints := func(a *adsc.ADSC, addr ...string) {
-		t.Helper()
-		got := sets.NewSet(xdstest.ExtractEndpoints(a.GetEndpoints()["outbound|80||foo.com"])...)
-		want := sets.NewSet(addr...)
-
-		if !got.Equals(want) {
-			t.Fatalf("invalid endpoints, got %v want %v", got, addr)
-		}
-	}
-
-	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{
-		Configs: []config.Config{
-			makeEndpoint([]*networking.WorkloadEntry{
-				{Address: "1.2.3.4", Locality: "region/zone"},
-				{Address: "1.2.3.5", Locality: "notmatch"},
-			}),
-		},
-	})
-	ads := s.Connect(&model.Proxy{Locality: &core.Locality{Region: "region"}}, nil, watchAll)
-
-	assertEndpoints(ads, "1.2.3.4:80", "1.2.3.5:80")
-	t.Logf("endpoints: %+v", ads.GetEndpoints())
-
-	if _, err := s.Store().Update(makeEndpoint([]*networking.WorkloadEntry{
-		{Address: "1.2.3.6", Locality: "region/zone"},
-		{Address: "1.2.3.5", Locality: "notmatch"},
-	})); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ads.Wait(time.Second*5, v3.EndpointType); err != nil {
-		t.Fatal(err)
-	}
-	assertEndpoints(ads, "1.2.3.6:80", "1.2.3.5:80")
-	t.Logf("endpoints: %+v", ads.GetEndpoints())
-
-	ads.WaitClear()
-	if _, err := s.Store().Create(config.Config{
-		Meta: config.Meta{
-			Name:             "service",
-			Namespace:        "default",
-			GroupVersionKind: gvk.DestinationRule,
-		},
-		Spec: &networking.DestinationRule{
-			Host: "foo.com",
-			TrafficPolicy: &networking.TrafficPolicy{
-				OutlierDetection: &networking.OutlierDetection{},
-			},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ads.Wait(time.Second*5, v3.EndpointType); err != nil {
-		t.Fatal(err)
-	}
-	assertEndpoints(ads, "1.2.3.6:80", "1.2.3.5:80")
-	found := false
-	for _, ep := range ads.GetEndpoints()["outbound|80||foo.com"].Endpoints {
-		if ep.Priority == 1 {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("locality did not update")
-	}
-	t.Logf("endpoints: %+v", ads.GetEndpoints())
-	ads.WaitClear()
-
-	ep := makeEndpoint([]*networking.WorkloadEntry{{Address: "1.2.3.6", Locality: "region/zone"}, {Address: "1.2.3.5", Locality: "notmatch"}})
-	ep.Spec.(*networking.ServiceEntry).Resolution = networking.ServiceEntry_DNS
-	if _, err := s.Store().Update(ep); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ads.Wait(time.Second*5, v3.EndpointType); err != nil {
-		t.Fatal(err)
-	}
-	assertEndpoints(ads)
-	t.Logf("endpoints: %+v", ads.GetEndpoints())
 }

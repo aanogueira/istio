@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,20 +25,22 @@ import (
 	"time"
 
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
-	"github.com/prometheus/common/model"
-	"golang.org/x/sync/errgroup"
 	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"istio.io/pkg/log"
+
+	"github.com/prometheus/common/model"
+	"golang.org/x/sync/errgroup"
 
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	"istio.io/istio/pkg/test/framework/components/ingress"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/framework/components/prometheus"
-	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/scopes"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/test/util/yml"
@@ -47,10 +48,9 @@ import (
 
 var (
 	dashboards = []struct {
-		configmap      string
-		name           string
-		excluded       []string
-		requirePrimary bool
+		configmap string
+		name      string
+		excluded  []string
 	}{
 		{
 			"istio-grafana-dashboards",
@@ -60,8 +60,7 @@ var (
 				"pilot_total_xds_internal_errors",
 				"pilot_xds_push_context_errors",
 				`pilot_xds_pushes{type!~"lds|cds|rds|eds"}`,
-				// We do not push credentials in this test
-				`pilot_xds_pushes{type="sds"}`,
+				"pilot_xds_eds_instances",
 				"_timeout",
 				"_rejects",
 				// We do not simulate injection errors
@@ -73,8 +72,6 @@ var (
 				// cAdvisor does not expose this metrics, and we don't have kubelet in kind
 				"container_fs_usage_bytes",
 			},
-			// Pilot is installed only on Primary cluster, hence validate for primary clusters only.
-			true,
 		},
 		{
 			"istio-services-grafana-dashboards",
@@ -82,9 +79,7 @@ var (
 			[]string{
 				"galley_",
 				"istio_tcp_",
-				"max(pilot_k8s_cfg_events{",
 			},
-			false,
 		},
 		{
 			"istio-services-grafana-dashboards",
@@ -92,7 +87,6 @@ var (
 			[]string{
 				"istio_tcp_",
 			},
-			false,
 		},
 		{
 			"istio-services-grafana-dashboards",
@@ -100,7 +94,6 @@ var (
 			[]string{
 				"istio_tcp_",
 			},
-			false,
 		},
 		{
 			"istio-grafana-dashboards",
@@ -112,15 +105,14 @@ var (
 				// cAdvisor does not expose this metrics, and we don't have kubelet in kind
 				"container_fs_usage_bytes",
 			},
-			true,
 		},
 		{
-			"istio-services-grafana-dashboards",
-			"istio-extension-dashboard.json",
+			"istio-grafana-dashboards",
+			"mixer-dashboard.json",
 			[]string{
-				"avg(envoy_wasm_vm_v8_",
+				// Exclude all metrics -- mixer is disabled by default
+				"_",
 			},
-			false,
 		},
 	}
 )
@@ -131,37 +123,31 @@ func TestDashboard(t *testing.T) {
 		Run(func(ctx framework.TestContext) {
 
 			p := prometheus.NewOrFail(ctx, ctx, prometheus.Config{})
+			kenv := ctx.Environment().(*kube.Environment)
 			setupDashboardTest(ctx)
 			waitForMetrics(ctx, p)
 			for _, d := range dashboards {
 				d := d
 				ctx.NewSubTest(d.name).RunParallel(func(t framework.TestContext) {
-					for _, cl := range ctx.Clusters() {
-						if !cl.IsPrimary() && d.requirePrimary {
-							// Skip verification of dashboards that won't be present on non primary(remote) clusters.
-							continue
-						}
-						t.Logf("Verifying %s for cluster %s", d.name, cl.Name())
-						cm, err := cl.CoreV1().ConfigMaps(i.Settings().TelemetryNamespace).Get(
-							context.TODO(), d.configmap, kubeApiMeta.GetOptions{})
-						if err != nil {
-							t.Fatalf("Failed to find dashboard %v: %v", d.configmap, err)
-						}
+					cm, err := kenv.KubeClusters[0].CoreV1().ConfigMaps(i.Settings().TelemetryNamespace).Get(
+						context.TODO(), d.configmap, kubeApiMeta.GetOptions{})
+					if err != nil {
+						t.Fatalf("Failed to find dashboard %v: %v", d.configmap, err)
+					}
 
-						config, f := cm.Data[d.name]
-						if !f {
-							t.Fatalf("Failed to find expected dashboard: %v", d.name)
-						}
+					config, f := cm.Data[d.name]
+					if !f {
+						t.Fatalf("Failed to find expected dashboard: %v", d.name)
+					}
 
-						queries, err := extractQueries(config)
-						if err != nil {
-							t.Fatalf("Failed to extract queries: %v", err)
-						}
+					queries, err := extractQueries(config)
+					if err != nil {
+						t.Fatalf("Failed to extract queries: %v", err)
+					}
 
-						for _, query := range queries {
-							if err := checkMetric(cl, p, query, d.excluded); err != nil {
-								t.Errorf("Check query failed for cluster %s: %v", cl.Name(), err)
-							}
+					for _, query := range queries {
+						if err := checkMetric(p, query, d.excluded); err != nil {
+							t.Errorf("Check query failed: %v", err)
 						}
 					}
 				})
@@ -191,9 +177,9 @@ var (
 	)
 )
 
-func checkMetric(cl resource.Cluster, p prometheus.Instance, query string, excluded []string) error {
+func checkMetric(p prometheus.Instance, query string, excluded []string) error {
 	query = replacer.Replace(query)
-	value, _, err := p.APIForCluster(cl).QueryRange(context.Background(), query, promv1.Range{
+	value, _, err := p.API().QueryRange(context.Background(), query, promv1.Range{
 		Start: time.Now().Add(-time.Minute),
 		End:   time.Now(),
 		Step:  time.Second,
@@ -237,15 +223,13 @@ func waitForMetrics(t framework.TestContext, instance prometheus.Instance) {
 		`istio_tcp_received_bytes_total`,
 	}
 
-	for _, cl := range t.Clusters() {
-		for _, query := range queries {
-			err := retry.UntilSuccess(func() error {
-				return checkMetric(cl, instance, query, nil)
-			})
-			// Do not fail here - this is just to let the metrics sync. We will fail on the test if query fails
-			if err != nil {
-				t.Logf("Sentinel query %v failed: %v", query, err)
-			}
+	for _, query := range queries {
+		err := retry.UntilSuccess(func() error {
+			return checkMetric(instance, query, nil)
+		})
+		// Do not fail here - this is just to let the metrics sync. We will fail on the test if query fails
+		if err != nil {
+			t.Logf("Sentinel query %v failed: %v", query, err)
 		}
 	}
 }
@@ -314,73 +298,62 @@ func setupDashboardTest(t framework.TestContext) {
 	}
 	t.Config().ApplyYAMLOrFail(t, "istio-system", yml.SplitYamlByKind(string(cfg))["ConfigMap"])
 
-	for _, cl := range t.Clusters() {
-		var instance echo.Instance
-		echoboot.
-			NewBuilder(t).
-			With(&instance, echo.Config{
-				Service:   "server",
-				Cluster:   cl,
-				Namespace: ns,
-				Subsets:   []echo.SubsetConfig{{}},
-				Ports: []echo.Port{
-					{
-						Name:     "http",
-						Protocol: protocol.HTTP,
-						// We use a port > 1024 to not require root
-						InstancePort: 8090,
-					},
-					{
-						Name:         "tcp",
-						Protocol:     protocol.TCP,
-						InstancePort: 7777,
-						ServicePort:  7777,
-					},
+	var instance echo.Instance
+	echoboot.
+		NewBuilderOrFail(t, t).
+		With(&instance, echo.Config{
+			Service:   "server",
+			Namespace: ns,
+			Subsets:   []echo.SubsetConfig{{}},
+			Ports: []echo.Port{
+				{
+					Name:     "http",
+					Protocol: protocol.HTTP,
+					// We use a port > 1024 to not require root
+					InstancePort: 8090,
 				},
-			}).
-			BuildOrFail(t)
-	}
+				{
+					Name:         "tcp",
+					Protocol:     protocol.TCP,
+					InstancePort: 7777,
+					ServicePort:  7777,
+				},
+			},
+		}).
+		BuildOrFail(t)
+
 	// Send 200 http requests, 20 tcp requests across goroutines, generating a variety of error codes.
-	// Spread out over 20s so rate() queries will behave correctly
+	// Spread out over 5s so rate() queries will behave correctly
 	g, _ := errgroup.WithContext(context.Background())
-	ticker := time.NewTicker(time.Second)
+	addr := ingr.HTTPAddress()
+	tcpAddr := ingr.TCPAddress()
+	ticker := time.NewTicker(time.Second * 5)
 	for t := 0; t < 20; t++ {
 		<-ticker.C
 		g.Go(func() error {
-			for _, ing := range ingr {
-				tcpAddr := ing.TCPAddress()
-				for i := 0; i < 10; i++ {
-					_, err := ing.CallEcho(echo.CallOptions{
-						Port: &echo.Port{
-							Protocol: protocol.HTTP,
-						},
-						Path: fmt.Sprintf("/echo-%s?codes=418:10,520:15,200:75", ns.Name()),
-						Headers: map[string][]string{
-							"Host": {"server"},
-						},
-					})
-					if err != nil {
-						// Do not fail on errors since there may be initial startup errors
-						// These calls are not under tests, the dashboards are, so we can be leniant here
-						log.Warnf("requests failed: %v", err)
-					}
-				}
-				_, err := ing.CallEcho(echo.CallOptions{
-					Port: &echo.Port{
-						Protocol:    protocol.TCP,
-						ServicePort: tcpAddr.Port,
-					},
-					Address: tcpAddr.IP.String(),
-					Path:    fmt.Sprintf("/echo-%s", ns.Name()),
-					Headers: map[string][]string{
-						"Host": {"server"},
-					},
+			for i := 0; i < 10; i++ {
+				_, err := ingr.Call(ingress.CallOptions{
+					Host:     "server",
+					Path:     fmt.Sprintf("/echo-%s?codes=418:10,520:15,200:75", ns.Name()),
+					CallType: ingress.PlainText,
+					Address:  addr,
 				})
 				if err != nil {
 					// Do not fail on errors since there may be initial startup errors
 					// These calls are not under tests, the dashboards are, so we can be leniant here
 					log.Warnf("requests failed: %v", err)
 				}
+			}
+			_, err := ingr.Call(ingress.CallOptions{
+				Host:     "server",
+				Path:     fmt.Sprintf("/echo-%s", ns.Name()),
+				CallType: ingress.PlainText,
+				Address:  tcpAddr,
+			})
+			if err != nil {
+				// Do not fail on errors since there may be initial startup errors
+				// These calls are not under tests, the dashboards are, so we can be leniant here
+				log.Warnf("requests failed: %v", err)
 			}
 			return nil
 		})

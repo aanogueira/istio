@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/go-multierror"
+	multierror "github.com/hashicorp/go-multierror"
 	kubeApiAdmission "k8s.io/api/admissionregistration/v1beta1"
 	kubeApiCore "k8s.io/api/core/v1"
 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,11 +46,12 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
+	"istio.io/pkg/filewatcher"
+	"istio.io/pkg/log"
+
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/kube"
-	"istio.io/pkg/filewatcher"
-	"istio.io/pkg/log"
 )
 
 var scope = log.RegisterScope("validationController", "validation webhook controller", 0)
@@ -316,7 +317,6 @@ func (c *Controller) processNextWorkItem() (cont bool) {
 
 	// return false when leader lost in case go routine leak.
 	if req.description == QuitSignal {
-		c.queue.Forget(req)
 		return false
 	}
 

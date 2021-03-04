@@ -20,7 +20,7 @@ import (
 	"github.com/gogo/protobuf/proto"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pkg/config"
+
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/xds"
 )
@@ -59,7 +59,7 @@ var wellKnownVersions = map[string]string{
 }
 
 // convertToEnvoyFilterWrapper converts from EnvoyFilter config to EnvoyFilterWrapper object
-func convertToEnvoyFilterWrapper(local *config.Config) *EnvoyFilterWrapper {
+func convertToEnvoyFilterWrapper(local *Config) *EnvoyFilterWrapper {
 	localEnvoyFilter := local.Spec.(*networking.EnvoyFilter)
 
 	out := &EnvoyFilterWrapper{}
@@ -74,9 +74,7 @@ func convertToEnvoyFilterWrapper(local *config.Config) *EnvoyFilterWrapper {
 			Operation: cp.Patch.Operation,
 		}
 		var err error
-		// Use non-strict building to avoid issues where EnvoyFilter is valid but meant
-		// for a different version of the API than we are built with
-		cpw.Value, err = xds.BuildXDSObjectFromStruct(cp.ApplyTo, cp.Patch.Value, false)
+		cpw.Value, err = xds.BuildXDSObjectFromStruct(cp.ApplyTo, cp.Patch.Value)
 		// There generally won't be an error here because validation catches mismatched types
 		// Should only happen in tests or without validation
 		if err != nil {
@@ -105,10 +103,9 @@ func convertToEnvoyFilterWrapper(local *config.Config) *EnvoyFilterWrapper {
 			cpw.Operation == networking.EnvoyFilter_Patch_INSERT_BEFORE ||
 			cpw.Operation == networking.EnvoyFilter_Patch_INSERT_FIRST {
 			// insert_before, after or first is applicable only for network filter and http filter
+			// TODO: insert before/after is also applicable to http_routes
 			// convert the rest to add
-			if cpw.ApplyTo != networking.EnvoyFilter_HTTP_FILTER &&
-				cpw.ApplyTo != networking.EnvoyFilter_NETWORK_FILTER &&
-				cpw.ApplyTo != networking.EnvoyFilter_HTTP_ROUTE {
+			if cpw.ApplyTo != networking.EnvoyFilter_HTTP_FILTER && cpw.ApplyTo != networking.EnvoyFilter_NETWORK_FILTER {
 				cpw.Operation = networking.EnvoyFilter_Patch_ADD
 			}
 		}

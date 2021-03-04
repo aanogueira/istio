@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,13 +21,15 @@ import (
 	"testing"
 	"time"
 
+	ingressutil "istio.io/istio/tests/integration/security/sds_ingress/util"
+
+	"istio.io/istio/pkg/test/framework/components/istio"
+	"istio.io/istio/pkg/test/framework/components/namespace"
+
 	"istio.io/istio/pkg/test/echo/common/response"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
-	"istio.io/istio/pkg/test/framework/components/istio"
-	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/retry"
-	ingressutil "istio.io/istio/tests/integration/security/sds_ingress/util"
 	sdstlsutil "istio.io/istio/tests/integration/security/sds_tls_origination/util"
 )
 
@@ -52,12 +53,12 @@ func TestSimpleTlsOrigination(t *testing.T) {
 				CaCert: sdstlsutil.FakeRoot,
 			}
 			// Add kubernetes secret to provision key/cert for gateway.
-			sdstlsutil.CreateKubeSecret(ctx, []string{credName}, "SIMPLE", credentialA, false)
-			defer ingressutil.DeleteKubeSecret(ctx, []string{credName})
+			sdstlsutil.CreateKubeSecret(t, ctx, []string{credName}, "SIMPLE", credentialA, false)
+			defer ingressutil.DeleteKubeSecret(t, ctx, []string{credName})
 
 			// Add kubernetes secret to provision key/cert for gateway.
-			sdstlsutil.CreateKubeSecret(ctx, []string{fakeCredName}, "SIMPLE", CredentialB, false)
-			defer ingressutil.DeleteKubeSecret(ctx, []string{fakeCredName})
+			sdstlsutil.CreateKubeSecret(t, ctx, []string{fakeCredName}, "SIMPLE", CredentialB, false)
+			defer ingressutil.DeleteKubeSecret(t, ctx, []string{fakeCredName})
 
 			internalClient, externalServer, _, serverNamespace := sdstlsutil.SetupEcho(t, ctx)
 
@@ -98,8 +99,8 @@ func TestSimpleTlsOrigination(t *testing.T) {
 					bufDestinationRule := sdstlsutil.CreateDestinationRule(t, serverNamespace, "SIMPLE", tc.credentialToUse)
 
 					// Get namespace for gateway pod.
-					istioCfg := istio.DefaultConfigOrFail(ctx, ctx)
-					systemNS := namespace.ClaimOrFail(ctx, ctx, istioCfg.SystemNamespace)
+					istioCfg := istio.DefaultConfigOrFail(t, ctx)
+					systemNS := namespace.ClaimOrFail(t, ctx, istioCfg.SystemNamespace)
 
 					ctx.Config().ApplyYAMLOrFail(ctx, systemNS.Name(), bufDestinationRule.String())
 					defer ctx.Config().DeleteYAMLOrFail(ctx, systemNS.Name(), bufDestinationRule.String())
@@ -178,20 +179,20 @@ func TestMutualTlsOrigination(t *testing.T) {
 				CaCert:     sdstlsutil.MustReadCert(t, "root-cert.pem"),
 			}
 			// Add kubernetes secret to provision key/cert for gateway.
-			sdstlsutil.CreateKubeSecret(ctx, []string{credNameGeneric}, "MUTUAL", credentialAGeneric, false)
-			defer ingressutil.DeleteKubeSecret(ctx, []string{credNameGeneric})
+			sdstlsutil.CreateKubeSecret(t, ctx, []string{credNameGeneric}, "MUTUAL", credentialAGeneric, false)
+			defer ingressutil.DeleteKubeSecret(t, ctx, []string{credNameGeneric})
 
-			sdstlsutil.CreateKubeSecret(ctx, []string{credNameNotGeneric}, "MUTUAL", credentialANonGeneric, true)
-			defer ingressutil.DeleteKubeSecret(ctx, []string{credNameNotGeneric})
+			sdstlsutil.CreateKubeSecret(t, ctx, []string{credNameNotGeneric}, "MUTUAL", credentialANonGeneric, true)
+			defer ingressutil.DeleteKubeSecret(t, ctx, []string{credNameNotGeneric})
 
-			sdstlsutil.CreateKubeSecret(ctx, []string{fakeCredNameA}, "MUTUAL", credentialBCert, false)
-			defer ingressutil.DeleteKubeSecret(ctx, []string{fakeCredNameA})
+			sdstlsutil.CreateKubeSecret(t, ctx, []string{fakeCredNameA}, "MUTUAL", credentialBCert, false)
+			defer ingressutil.DeleteKubeSecret(t, ctx, []string{fakeCredNameA})
 
-			sdstlsutil.CreateKubeSecret(ctx, []string{fakeCredNameB}, "MUTUAL", credentialBCertAndKey, false)
-			defer ingressutil.DeleteKubeSecret(ctx, []string{fakeCredNameB})
+			sdstlsutil.CreateKubeSecret(t, ctx, []string{fakeCredNameB}, "MUTUAL", credentialBCertAndKey, false)
+			defer ingressutil.DeleteKubeSecret(t, ctx, []string{fakeCredNameB})
 
-			sdstlsutil.CreateKubeSecret(ctx, []string{simpleCredName}, "SIMPLE", credentialASimple, false)
-			defer ingressutil.DeleteKubeSecret(ctx, []string{simpleCredName})
+			sdstlsutil.CreateKubeSecret(t, ctx, []string{simpleCredName}, "SIMPLE", credentialASimple, false)
+			defer ingressutil.DeleteKubeSecret(t, ctx, []string{simpleCredName})
 
 			internalClient, externalServer, _, serverNamespace := sdstlsutil.SetupEcho(t, ctx)
 
@@ -249,7 +250,7 @@ func TestMutualTlsOrigination(t *testing.T) {
 
 						// Get namespace for gateway pod.
 						istioCfg := istio.DefaultConfigOrFail(t, ctx)
-						systemNS := namespace.ClaimOrFail(ctx, ctx, istioCfg.SystemNamespace)
+						systemNS := namespace.ClaimOrFail(t, ctx, istioCfg.SystemNamespace)
 
 						ctx.Config().ApplyYAMLOrFail(ctx, systemNS.Name(), bufDestinationRule.String())
 						defer ctx.Config().DeleteYAMLOrFail(ctx, systemNS.Name(), bufDestinationRule.String())

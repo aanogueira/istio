@@ -34,7 +34,6 @@ import (
 	"istio.io/istio/operator/pkg/util/clog"
 	"istio.io/istio/operator/pkg/util/httpserver"
 	"istio.io/istio/operator/pkg/util/tgz"
-	tutil "istio.io/istio/pilot/test/util"
 	"istio.io/istio/pkg/test/env"
 	"istio.io/pkg/version"
 )
@@ -78,8 +77,28 @@ type testGroup []struct {
 	chartSource                 chartSourceType
 }
 
+func TestManifestGeneratePrometheus(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	objss, err := runManifestCommands("prometheus", "", liveCharts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"ClusterRole::prometheus-istio-system",
+		"ClusterRoleBinding::prometheus-istio-system",
+		"ConfigMap:istio-system:prometheus",
+		"Deployment:istio-system:prometheus",
+		"Service:istio-system:prometheus",
+		"ServiceAccount:istio-system:prometheus",
+	}
+	for _, objs := range objss {
+		g.Expect(objs.keySlice).Should(ContainElements(want))
+	}
+}
+
 func TestManifestGenerateComponentHubTag(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	objs, err := runManifestCommands("component_hub_tag", "", liveCharts)
 	if err != nil {
@@ -92,6 +111,14 @@ func TestManifestGenerateComponentHubTag(t *testing.T) {
 		want           string
 	}{
 		{
+			deploymentName: "prometheus",
+			want:           "docker.io/prometheus:1.1.1",
+		},
+		{
+			deploymentName: "grafana",
+			want:           "grafana/grafana:1.2.3",
+		},
+		{
 			deploymentName: "istio-ingressgateway",
 			containerName:  "istio-proxy",
 			want:           "istio-spec.hub/proxyv2:istio-spec.tag",
@@ -100,6 +127,10 @@ func TestManifestGenerateComponentHubTag(t *testing.T) {
 			deploymentName: "istiod",
 			containerName:  "discovery",
 			want:           "component.pilot.hub/pilot:2",
+		},
+		{
+			deploymentName: "kiali",
+			want:           "docker.io/testing/kiali:v1.22",
 		},
 	}
 
@@ -116,7 +147,7 @@ func TestManifestGenerateComponentHubTag(t *testing.T) {
 }
 
 func TestManifestGenerateGateways(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	flags := "-s components.ingressGateways.[0].k8s.resources.requests.memory=999Mi " +
 		"-s components.ingressGateways.[name:user-ingressgateway].k8s.resources.requests.cpu=555m"
@@ -171,7 +202,7 @@ func TestManifestGenerateGateways(t *testing.T) {
 }
 
 func TestManifestGenerateIstiodRemote(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	objss, err := runManifestCommands("istiod_remote", "", liveCharts)
 	if err != nil {
@@ -184,12 +215,12 @@ func TestManifestGenerateIstiodRemote(t *testing.T) {
 		g.Expect(objs.kind(name.CRDStr).nameEquals("gateways.networking.istio.io")).Should(Not(BeNil()))
 		g.Expect(objs.kind(name.CRDStr).nameEquals("sidecars.networking.istio.io")).Should(Not(BeNil()))
 		g.Expect(objs.kind(name.CRDStr).nameEquals("virtualservices.networking.istio.io")).Should(Not(BeNil()))
-		g.Expect(objs.kind(name.CRDStr).nameEquals("adapters.config.istio.io")).Should(BeNil())
+		g.Expect(objs.kind(name.CRDStr).nameEquals("adapters.config.istio.io")).Should(Not(BeNil()))
 		g.Expect(objs.kind(name.CRDStr).nameEquals("authorizationpolicies.security.istio.io")).Should(Not(BeNil()))
 
 		g.Expect(objs.kind(name.ClusterRoleStr).nameEquals("istiod-istio-system")).Should(Not(BeNil()))
 		g.Expect(objs.kind(name.ClusterRoleStr).nameEquals("istio-reader-istio-system")).Should(Not(BeNil()))
-		g.Expect(objs.kind(name.ClusterRoleBindingStr).nameEquals("istiod-istio-system")).Should(Not(BeNil()))
+		g.Expect(objs.kind(name.ClusterRoleBindingStr).nameEquals("istiod-pilot-istio-system")).Should(Not(BeNil()))
 		g.Expect(objs.kind(name.ClusterRoleBindingStr).nameEquals("istio-reader-istio-system")).Should(Not(BeNil()))
 		g.Expect(objs.kind(name.CMStr).nameEquals("istio-sidecar-injector")).Should(Not(BeNil()))
 		g.Expect(objs.kind(name.ServiceStr).nameEquals("istiod")).Should(Not(BeNil()))
@@ -197,7 +228,7 @@ func TestManifestGenerateIstiodRemote(t *testing.T) {
 		g.Expect(objs.kind(name.SAStr).nameEquals("istiod-service-account")).Should(Not(BeNil()))
 
 		mwc := mustGetMutatingWebhookConfiguration(g, objs, "istio-sidecar-injector").Unstructured()
-		g.Expect(mwc).Should(HavePathValueEqual(PathValue{"webhooks.[0].clientConfig.url", "https://xxx:15017/inject"}))
+		g.Expect(mwc).Should(HavePathValueEqual(PathValue{"webhooks.[0].clientConfig.url", "https://xxx:15017/inject/cluster/remote0/net/network2"}))
 		g.Expect(mwc).Should(HavePathValueContain(PathValue{"webhooks.[0].namespaceSelector.matchLabels", toMap("istio-injection:enabled")}))
 
 		vwc := mustGetValidatingWebhookConfiguration(g, objs, "istiod-istio-system").Unstructured()
@@ -212,7 +243,7 @@ func TestManifestGenerateIstiodRemote(t *testing.T) {
 }
 
 func TestManifestGenerateAllOff(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	m, _, err := generateManifest("all_off", "", liveCharts)
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +256,7 @@ func TestManifestGenerateAllOff(t *testing.T) {
 }
 
 func TestManifestGenerateFlagsMinimalProfile(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	// Change profile from empty to minimal using flag.
 	m, _, err := generateManifest("empty", "-s profile=minimal", liveCharts)
 	if err != nil {
@@ -240,7 +271,7 @@ func TestManifestGenerateFlagsMinimalProfile(t *testing.T) {
 }
 
 func TestManifestGenerateFlagsSetHubTag(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	m, _, err := generateManifest("minimal", "-s hub=foo -s tag=bar", liveCharts)
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +288,7 @@ func TestManifestGenerateFlagsSetHubTag(t *testing.T) {
 }
 
 func TestManifestGenerateFlagsSetValues(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	m, _, err := generateManifest("default", "-s values.global.proxy.image=myproxy -s values.global.proxy.includeIPRanges=172.30.0.0/16,172.21.0.0/16", liveCharts)
 	if err != nil {
 		t.Fatal(err)
@@ -269,7 +300,7 @@ func TestManifestGenerateFlagsSetValues(t *testing.T) {
 	dobj := mustGetDeployment(g, objs, "istio-ingressgateway")
 
 	c := dobj.Container("istio-proxy")
-	g.Expect(c).Should(HavePathValueEqual(PathValue{"image", "gcr.io/istio-testing/myproxy:latest"}))
+	g.Expect(c).Should(HavePathValueEqual(PathValue{"image", "gcr.io/istio-testing/myproxy:1.7-dev"}))
 
 	cm := objs.kind("ConfigMap").nameEquals("istio-sidecar-injector").Unstructured()
 	// TODO: change values to some nicer format rather than text block.
@@ -341,6 +372,30 @@ func TestManifestGeneratePilot(t *testing.T) {
 	})
 }
 
+func TestManifestGenerateTelemetry(t *testing.T) {
+	runTestGroup(t, testGroup{
+		{
+			desc: "all_off",
+		},
+		{
+			desc:       "telemetry_default",
+			diffIgnore: "",
+		},
+		{
+			desc:       "telemetry_k8s_settings",
+			diffSelect: "Deployment:*:istio-telemetry, HorizontalPodAutoscaler:*:istio-telemetry",
+		},
+		{
+			desc:       "telemetry_override_values",
+			diffSelect: "handler:*:prometheus",
+		},
+		{
+			desc:       "telemetry_override_kubernetes",
+			diffSelect: "Deployment:*:istio-telemetry, handler:*:prometheus",
+		},
+	})
+}
+
 func TestManifestGenerateGateway(t *testing.T) {
 	runTestGroup(t, testGroup{
 		{
@@ -350,13 +405,23 @@ func TestManifestGenerateGateway(t *testing.T) {
 	})
 }
 
+func TestManifestGenerateAddonK8SOverride(t *testing.T) {
+	runTestGroup(t, testGroup{
+		{
+			desc:       "addon_k8s_override",
+			diffSelect: "Service:*:prometheus, Deployment:*:prometheus, Service:*:kiali",
+		},
+	})
+}
+
 // TestManifestGenerateHelmValues tests whether enabling components through the values passthrough interface works as
 // expected i.e. without requiring enablement also in IstioOperator API.
 func TestManifestGenerateHelmValues(t *testing.T) {
 	runTestGroup(t, testGroup{
 		{
-			desc:       "helm_values_enablement",
-			diffSelect: "Deployment:*:istio-egressgateway, Service:*:istio-egressgateway",
+			desc: "helm_values_enablement",
+			diffSelect: "Deployment:*:istio-egressgateway, Service:*:istio-egressgateway," +
+				" Deployment:*:kiali, Service:*:kiali, Deployment:*:prometheus, Service:*:prometheus",
 		},
 	})
 }
@@ -398,18 +463,18 @@ func TestManifestGenerateFlagAliases(t *testing.T) {
 
 func TestMultiICPSFiles(t *testing.T) {
 	inPathBase := filepath.Join(testDataDir, "input/all_off.yaml")
-	inPathOverride := filepath.Join(testDataDir, "input/helm_values_enablement.yaml")
+	inPathOverride := filepath.Join(testDataDir, "input/telemetry_override_only.yaml")
 	got, err := runManifestGenerate([]string{inPathBase, inPathOverride}, "", snapshotCharts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	outPath := filepath.Join(testDataDir, "output/helm_values_enablement"+goldenFileSuffixHideChangesInReview)
+	outPath := filepath.Join(testDataDir, "output/telemetry_override_values"+goldenFileSuffixHideChangesInReview)
 
 	want, err := readFile(outPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	diffSelect := "Deployment:*:istio-egressgateway, Service:*:istio-egressgateway"
+	diffSelect := "handler:*:prometheus"
 	got, err = compare.FilterManifest(got, diffSelect, "")
 	if err != nil {
 		t.Errorf("error selecting from output manifest: %v", err)
@@ -606,20 +671,18 @@ func TestLDFlags(t *testing.T) {
 	version.DockerInfo.Hub = "testHub"
 	version.DockerInfo.Tag = "testTag"
 	l := clog.NewConsoleLogger(os.Stdout, os.Stderr, installerScope)
-	_, iop, err := manifest.GenerateConfig(nil, []string{"installPackagePath=" + string(liveCharts)}, true, nil, l)
+	_, iops, err := manifest.GenerateConfig(nil, []string{"installPackagePath=" + string(liveCharts)}, true, nil, l)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if iop.Spec.Hub != version.DockerInfo.Hub || iop.Spec.Tag != version.DockerInfo.Tag {
-		t.Fatalf("DockerInfoHub, DockerInfoTag got: %s,%s, want: %s, %s", iop.Spec.Hub, iop.Spec.Tag, version.DockerInfo.Hub, version.DockerInfo.Tag)
+	if iops.Hub != version.DockerInfo.Hub || iops.Tag != version.DockerInfo.Tag {
+		t.Fatalf("DockerInfoHub, DockerInfoTag got: %s,%s, want: %s, %s", iops.Hub, iops.Tag, version.DockerInfo.Hub, version.DockerInfo.Tag)
 	}
 }
 
 func runTestGroup(t *testing.T, tests testGroup) {
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.desc, func(t *testing.T) {
-			t.Parallel()
 			inPath := filepath.Join(testDataDir, "input", tt.desc+".yaml")
 			outputSuffix := goldenFileSuffixHideChangesInReview
 			if tt.showOutputFileInPullRequest {
@@ -659,7 +722,12 @@ func runTestGroup(t *testing.T, tests testGroup) {
 				}
 			}
 
-			tutil.RefreshGoldenFile([]byte(got), outPath, t)
+			if refreshGoldenFiles() {
+				t.Logf("Refreshing golden file for %s", outPath)
+				if err := ioutil.WriteFile(outPath, []byte(got), 0644); err != nil {
+					t.Error(err)
+				}
+			}
 
 			want, err := readFile(outPath)
 			if err != nil {

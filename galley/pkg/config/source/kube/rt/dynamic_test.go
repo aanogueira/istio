@@ -24,14 +24,15 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
+	"istio.io/istio/pkg/config/schema/resource"
+
 	"istio.io/istio/galley/pkg/config/source/kube/rt"
 	"istio.io/istio/galley/pkg/config/testing/basicmeta"
 	"istio.io/istio/galley/pkg/config/testing/data"
-	"istio.io/istio/pkg/config"
 )
 
 func TestParseDynamic(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	input, err := yaml.ToJSON([]byte(data.YamlN1I1V1))
 	g.Expect(err).To(BeNil())
 	objMeta, objResource := parseDynamic(t, input, "Kind1")
@@ -52,13 +53,13 @@ func TestExtractObjectDynamic(t *testing.T) {
 		t.Run(r.Resource().Kind(), func(t *testing.T) {
 			t.Run("WrongTypeShouldReturnNil", func(t *testing.T) {
 				out := a.ExtractObject(struct{}{})
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(out).To(BeNil())
 			})
 
 			t.Run("Success", func(t *testing.T) {
 				out := a.ExtractObject(&unstructured.Unstructured{})
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(out).ToNot(BeNil())
 			})
 		})
@@ -72,13 +73,13 @@ func TestExtractResourceDynamic(t *testing.T) {
 		t.Run(r.Resource().Kind(), func(t *testing.T) {
 			t.Run("WrongTypeShouldReturnNil", func(t *testing.T) {
 				_, err := a.ExtractResource(struct{}{})
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(err).NotTo(BeNil())
 			})
 
 			t.Run("Success", func(t *testing.T) {
 				out, err := a.ExtractResource(&unstructured.Unstructured{})
-				g := NewWithT(t)
+				g := NewGomegaWithT(t)
 				g.Expect(err).To(BeNil())
 				g.Expect(out).ToNot(BeNil())
 			})
@@ -88,10 +89,10 @@ func TestExtractResourceDynamic(t *testing.T) {
 
 func parseDynamic(t *testing.T, input []byte, kind string) (metaV1.Object, proto.Message) {
 	t.Helper()
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	pr := rt.DefaultProvider()
-	a := pr.GetAdapter(basicmeta.MustGet().KubeCollections().MustFindByGroupVersionKind(config.GroupVersionKind{
+	a := pr.GetAdapter(basicmeta.MustGet().KubeCollections().MustFindByGroupVersionKind(resource.GroupVersionKind{
 		Group:   "testdata.istio.io",
 		Version: "v1alpha1",
 		Kind:    kind,

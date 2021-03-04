@@ -15,18 +15,24 @@
 package model
 
 import (
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/resource"
+
+	"time"
+
+	"istio.io/pkg/ledger"
 )
 
 type FakeStore struct {
-	store map[config.GroupVersionKind]map[string][]config.Config
+	store  map[resource.GroupVersionKind]map[string][]Config
+	ledger ledger.Ledger
 }
 
 func NewFakeStore() *FakeStore {
 	f := FakeStore{
-		store: make(map[config.GroupVersionKind]map[string][]config.Config),
+		store:  make(map[resource.GroupVersionKind]map[string][]Config),
+		ledger: ledger.Make(time.Minute),
 	}
 	return &f
 }
@@ -37,14 +43,14 @@ func (s *FakeStore) Schemas() collection.Schemas {
 	return collections.Pilot
 }
 
-func (*FakeStore) Get(typ config.GroupVersionKind, name, namespace string) *config.Config { return nil }
+func (*FakeStore) Get(typ resource.GroupVersionKind, name, namespace string) *Config { return nil }
 
-func (s *FakeStore) List(typ config.GroupVersionKind, namespace string) ([]config.Config, error) {
+func (s *FakeStore) List(typ resource.GroupVersionKind, namespace string) ([]Config, error) {
 	nsConfigs := s.store[typ]
 	if nsConfigs == nil {
 		return nil, nil
 	}
-	var res []config.Config
+	var res []Config
 	if namespace == NamespaceAll {
 		for _, configs := range nsConfigs {
 			res = append(res, configs...)
@@ -54,22 +60,32 @@ func (s *FakeStore) List(typ config.GroupVersionKind, namespace string) ([]confi
 	return nsConfigs[namespace], nil
 }
 
-func (s *FakeStore) Create(cfg config.Config) (revision string, err error) {
-	configs := s.store[cfg.GroupVersionKind]
+func (s *FakeStore) Create(config Config) (revision string, err error) {
+	configs := s.store[config.GroupVersionKind]
 	if configs == nil {
-		configs = make(map[string][]config.Config)
+		configs = make(map[string][]Config)
 	}
-	configs[cfg.Namespace] = append(configs[cfg.Namespace], cfg)
-	s.store[cfg.GroupVersionKind] = configs
+	configs[config.Namespace] = append(configs[config.Namespace], config)
+	s.store[config.GroupVersionKind] = configs
 	return "", nil
 }
 
-func (*FakeStore) Update(config config.Config) (newRevision string, err error) { return "", nil }
+func (*FakeStore) Update(config Config) (newRevision string, err error) { return "", nil }
 
-func (*FakeStore) UpdateStatus(config config.Config) (string, error) { return "", nil }
+func (*FakeStore) Delete(typ resource.GroupVersionKind, name, namespace string) error { return nil }
 
-func (*FakeStore) Patch(typ config.GroupVersionKind, name, namespace string, patchFn config.PatchFunc) (string, error) {
-	return "", nil
+func (s *FakeStore) Version() string {
+	return s.ledger.RootHash()
+}
+func (s *FakeStore) GetResourceAtVersion(version string, key string) (resourceVersion string, err error) {
+	return s.ledger.GetPreviousValue(version, key)
 }
 
-func (*FakeStore) Delete(typ config.GroupVersionKind, name, namespace string) error { return nil }
+func (s *FakeStore) GetLedger() ledger.Ledger {
+	return s.ledger
+}
+
+func (s *FakeStore) SetLedger(l ledger.Ledger) error {
+	s.ledger = l
+	return nil
+}

@@ -26,6 +26,7 @@ import (
 	"istio.io/istio/istioctl/pkg/util/configdump"
 	"istio.io/istio/istioctl/pkg/util/handlers"
 	"istio.io/istio/pkg/kube"
+
 	"istio.io/pkg/log"
 )
 
@@ -35,19 +36,19 @@ var (
 
 var (
 	checkCmd = &cobra.Command{
-		Use:   "check [<type>/]<name>[.<namespace>]",
+		Use:   "check <pod-name>[.<pod-namespace>]",
 		Short: "Check AuthorizationPolicy applied in the pod.",
 		Long: `Check prints the AuthorizationPolicy applied to a pod by directly checking
 the Envoy configuration of the pod. The command is especially useful for inspecting 
 the policy propagation from Istiod to Envoy and the final AuthorizationPolicy list merged 
 from multiple sources (mesh-level, namespace-level and workload-level).
 
-The command also supports reading from a standalone config dump file with flag -f.`,
+The command also supports reading from a standalone config dump file with flag -f.
+
+THIS COMMAND IS STILL UNDER ACTIVE DEVELOPMENT AND NOT READY FOR PRODUCTION USE.
+`,
 		Example: `  # Check AuthorizationPolicy applied to pod httpbin-88ddbcfdd-nt5jb:
   istioctl x authz check httpbin-88ddbcfdd-nt5jb
-
-  # Check AuthorizationPolicy applied to one pod under a deployment
-  istioctl proxy-status deployment/productpage-v1
 
   # Check AuthorizationPolicy from Envoy config dump file:
   istioctl x authz check -f httpbin_config_dump.json`,
@@ -67,16 +68,7 @@ The command also supports reading from a standalone config dump file with flag -
 					return fmt.Errorf("failed to get config dump from file %s: %s", configDumpFile, err)
 				}
 			} else if len(args) == 1 {
-				kubeClient, err := kubeClient(kubeconfig, configContext)
-				if err != nil {
-					return fmt.Errorf("failed to create k8s client: %w", err)
-				}
-				podName, podNamespace, err := handlers.InferPodInfoFromTypedResource(args[0],
-					handlers.HandleNamespace(namespace, defaultNamespace),
-					kubeClient.UtilFactory())
-				if err != nil {
-					return err
-				}
+				podName, podNamespace := handlers.InferPodInfo(args[0], handlers.HandleNamespace(namespace, defaultNamespace))
 				configDump, err = getConfigDumpFromPod(podName, podNamespace)
 				if err != nil {
 					return fmt.Errorf("failed to get config dump from pod %s in %s", podName, podNamespace)
@@ -153,7 +145,6 @@ func AuthZ() *cobra.Command {
 	}
 
 	cmd.AddCommand(checkCmd)
-	cmd.Long += "\n\n" + ExperimentalMsg
 	return cmd
 }
 

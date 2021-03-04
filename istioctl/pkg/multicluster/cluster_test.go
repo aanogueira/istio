@@ -32,7 +32,6 @@ import (
 	ktesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/clientcmd/api"
 
-	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/kube/secretcontroller"
 )
 
@@ -82,7 +81,7 @@ var (
 	}
 	clusterDescWithDefaults = ClusterDesc{
 		Network:              testNetwork,
-		ServiceAccountReader: constants.DefaultServiceAccountName,
+		ServiceAccountReader: DefaultServiceAccountName,
 		Namespace:            defaultIstioNamespace,
 	}
 )
@@ -289,7 +288,7 @@ func TestReadRemoteSecrets(t *testing.T) {
 				reaction := func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
 					return true, nil, c.injectListFailure
 				}
-				env.client.Kube().(*fake.Clientset).PrependReactor("list", "secrets", reaction)
+				env.client.PrependReactor("list", "secrets", reaction)
 			}
 			got := cluster.readRemoteSecrets(env)
 			g.Expect(got).To(Equal(c.want))
@@ -500,14 +499,14 @@ func TestReadCACerts(t *testing.T) {
 				reaction := func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
 					return true, nil, c.listFailure
 				}
-				env.client.Kube().(*fake.Clientset).PrependReactor("list", "secrets", reaction)
+				env.client.PrependReactor("list", "secrets", reaction)
 			}
 
 			if c.getFailure != nil {
 				reaction := func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
 					return true, nil, c.getFailure
 				}
-				env.client.Kube().(*fake.Clientset).PrependReactor("get", "secrets", reaction)
+				env.client.PrependReactor("get", "secrets", reaction)
 			}
 
 			got := cluster.readCACerts(env)
@@ -544,7 +543,7 @@ func serviceStatus(addresses ...address) *v1.ServiceStatus {
 }
 
 func TestReadIngressGatewayAddresses(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	applyTestCases := []struct {
 		in      *v1.ServiceStatus

@@ -38,11 +38,7 @@ func RequestAndProcessXds(dr *xdsapi.DiscoveryRequest, centralOpts *clioptions.C
 
 	// If Central Istiod case, just call it
 	if centralOpts.Xds != "" {
-		dialOpts, err := xds.DialOptions(centralOpts, kubeClient)
-		if err != nil {
-			return nil, err
-		}
-		return xds.GetXdsResponse(dr, centralOpts, dialOpts)
+		return xds.GetXdsResponse(dr, centralOpts)
 	}
 
 	// Self-administered case.  Find all Istiods in revision using K8s, port-forward and call each in turn
@@ -71,15 +67,6 @@ func queryEachShard(all bool, dr *xdsapi.DiscoveryRequest, istioNamespace string
 	}
 
 	responses := []*xdsapi.DiscoveryResponse{}
-	xdsOpts := clioptions.CentralControlPlaneOptions{
-		XDSSAN:  makeSan(istioNamespace, kubeClient.Revision()),
-		CertDir: centralOpts.CertDir,
-		Timeout: centralOpts.Timeout,
-	}
-	dialOpts, err := xds.DialOptions(&xdsOpts, kubeClient)
-	if err != nil {
-		return nil, err
-	}
 	for _, pod := range pods {
 		fw, err := kubeClient.NewPortForwarder(pod.Name, pod.Namespace, "localhost", 0, centralOpts.XdsPodPort)
 		if err != nil {
@@ -90,8 +77,12 @@ func queryEachShard(all bool, dr *xdsapi.DiscoveryRequest, istioNamespace string
 			return nil, err
 		}
 		defer fw.Close()
-		xdsOpts.Xds = fw.Address()
-		response, err := xds.GetXdsResponse(dr, &xdsOpts, dialOpts)
+		response, err := xds.GetXdsResponse(dr, &clioptions.CentralControlPlaneOptions{
+			Xds:     fw.Address(),
+			XDSSAN:  makeSan(istioNamespace, kubeClient.Revision()),
+			CertDir: centralOpts.CertDir,
+			Timeout: centralOpts.Timeout,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("could not get XDS from discovery pod %q: %v", pod.Name, err)
 		}
@@ -145,11 +136,7 @@ func multiRequestAndProcessXds(all bool, dr *xdsapi.DiscoveryRequest, centralOpt
 
 	// If Central Istiod case, just call it
 	if centralOpts.Xds != "" {
-		dialOpts, err := xds.DialOptions(centralOpts, kubeClient)
-		if err != nil {
-			return nil, err
-		}
-		response, err := xds.GetXdsResponse(dr, centralOpts, dialOpts)
+		response, err := xds.GetXdsResponse(dr, centralOpts)
 		if err != nil {
 			return nil, err
 		}

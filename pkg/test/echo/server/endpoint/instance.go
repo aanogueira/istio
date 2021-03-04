@@ -44,7 +44,6 @@ type Config struct {
 type Instance interface {
 	io.Closer
 	Start(onReady OnReadyFunc) error
-	GetConfig() Config
 }
 
 // New creates a new endpoint Instance.

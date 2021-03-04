@@ -15,6 +15,12 @@
 package v2
 
 const (
+	// ClusterType is used for cluster discovery. Typically first request received
+	ClusterType = "type.googleapis.com/envoy.api.v2.Cluster"
 	// EndpointType is used for EDS and ADS endpoint discovery. Typically second request.
 	EndpointType = "type.googleapis.com/envoy.api.v2.ClusterLoadAssignment"
+	// ListenerType is sent after clusters and endpoints.
+	ListenerType = "type.googleapis.com/envoy.api.v2.Listener"
+	// RouteType is sent after listeners.
+	RouteType = "type.googleapis.com/envoy.api.v2.RouteConfiguration"
 )

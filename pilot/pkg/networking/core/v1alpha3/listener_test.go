@@ -21,8 +21,10 @@ import (
 	"testing"
 	"time"
 
+	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	thrift "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/thrift_proxy/v3"
@@ -38,19 +40,18 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
+	mixerClient "istio.io/api/mixer/v1/config/client"
 	networking "istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pilot/pkg/config/memory"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	istionetworking "istio.io/istio/pilot/pkg/networking"
 	"istio.io/istio/pilot/pkg/networking/plugin"
-	"istio.io/istio/pilot/pkg/networking/plugin/registry"
 	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pilot/pkg/serviceregistry"
 	memregistry "istio.io/istio/pilot/pkg/serviceregistry/memory"
 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
-	"istio.io/istio/pilot/test/xdstest"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/protocol"
@@ -147,6 +148,10 @@ var (
 )
 
 func TestInboundListenerConfig(t *testing.T) {
+	defaultValue := features.EnableProtocolSniffingForInbound
+	features.EnableProtocolSniffingForInbound = true
+	defer func() { features.EnableProtocolSniffingForInbound = defaultValue }()
+
 	for _, p := range []*model.Proxy{getProxy(), &proxyHTTP10} {
 		testInboundListenerConfig(t, p,
 			buildService("test1.com", wildcardIP, protocol.HTTP, tnow.Add(1*time.Second)),
@@ -374,8 +379,8 @@ func TestOutboundListenerTCPWithVS(t *testing.T) {
 			}
 
 			p := &fakePlugin{}
-			virtualService := config.Config{
-				Meta: config.Meta{
+			virtualService := model.Config{
+				ConfigMeta: model.ConfigMeta{
 					GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 					Name:             "test_vs",
 					Namespace:        "default",
@@ -407,10 +412,6 @@ func TestOutboundListenerForHeadlessServices(t *testing.T) {
 	svc.Attributes.ServiceRegistry = string(serviceregistry.Kubernetes)
 	services := []*model.Service{svc}
 
-	autoSvc := buildServiceWithPort("test.com", 9999, protocol.Unsupported, tnow)
-	autoSvc.Resolution = model.Passthrough
-	autoSvc.Attributes.ServiceRegistry = string(serviceregistry.Kubernetes)
-
 	extSvc := buildServiceWithPort("example1.com", 9999, protocol.TCP, tnow)
 	extSvc.Resolution = model.Passthrough
 	extSvc.Attributes.ServiceRegistry = serviceregistry.External
@@ -420,6 +421,7 @@ func TestOutboundListenerForHeadlessServices(t *testing.T) {
 	extSvcSelector.Attributes.ServiceRegistry = serviceregistry.External
 	extSvcSelector.Attributes.LabelSelectors = map[string]string{"foo": "bar"}
 
+	p := &fakePlugin{}
 	tests := []struct {
 		name                      string
 		instances                 []*model.ServiceInstance
@@ -473,32 +475,26 @@ func TestOutboundListenerForHeadlessServices(t *testing.T) {
 			services:                  []*model.Service{extSvcSelector},
 			numListenersOnServicePort: 2,
 		},
-		{
-			name:                      "no listeners for empty Kubernetes auto protocol",
-			instances:                 []*model.ServiceInstance{},
-			services:                  []*model.Service{autoSvc},
-			numListenersOnServicePort: 0,
-		},
-		{
-			name: "listeners per instance for Kubernetes auto protocol",
-			instances: []*model.ServiceInstance{
-				buildServiceInstance(autoSvc, "10.10.10.10"),
-				buildServiceInstance(autoSvc, "11.11.11.11"),
-			},
-			services:                  []*model.Service{autoSvc},
-			numListenersOnServicePort: 2,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cg := NewConfigGenTest(t, TestOptions{
-				Services:  tt.services,
-				Instances: tt.instances,
-			})
+			configgen := NewConfigGenerator([]plugin.Plugin{p})
 
-			proxy := cg.SetupProxy(nil)
+			env := buildListenerEnv(tt.services)
+			serviceDiscovery := memregistry.NewServiceDiscovery(tt.services)
+			for _, i := range tt.instances {
+				serviceDiscovery.AddInstance(i.Service.Hostname, i)
+			}
+			env.ServiceDiscovery = serviceDiscovery
+			if err := env.PushContext.InitContext(&env, nil, nil); err != nil {
+				t.Errorf("Failed to initialize push context: %v", err)
+			}
 
-			listeners := cg.ConfigGen.buildSidecarOutboundListeners(proxy, cg.env.PushContext)
+			proxy := getProxy()
+			proxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
+			proxy.ServiceInstances = proxyInstances
+
+			listeners := configgen.buildSidecarOutboundListeners(proxy, env.PushContext)
 			listenersToCheck := make([]string, 0)
 			for _, l := range listeners {
 				if l.Address.GetSocketAddress().GetPortValue() == 9999 {
@@ -600,11 +596,10 @@ func TestOutboundTlsTrafficWithoutTimeout(t *testing.T) {
 
 func TestOutboundListenerConfigWithSidecarHTTPProxy(t *testing.T) {
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
-			Name:             "sidecar-with-http-proxy",
-			Namespace:        "not-default",
-			GroupVersionKind: gvk.Sidecar,
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "sidecar-with-http-proxy",
+			Namespace: "default",
 		},
 		Spec: &networking.Sidecar{
 			Egress: []*networking.IstioEgressListener{
@@ -742,7 +737,7 @@ func testOutboundListenerRoute(t *testing.T, services ...*model.Service) {
 	if l == nil {
 		t.Fatalf("expect listener %s", "1.2.3.4_8080")
 	}
-	f = l.FilterChains[0].Filters[0]
+	f = l.FilterChains[1].Filters[0]
 	cfg, _ = conversion.MessageToStruct(f.GetTypedConfig())
 	rds = cfg.Fields["rds"].GetStructValue().Fields["route_config_name"].GetStringValue()
 	if rds != "test1.com:8080" {
@@ -753,7 +748,7 @@ func testOutboundListenerRoute(t *testing.T, services ...*model.Service) {
 	if l == nil {
 		t.Fatalf("expect listener %s", "3.4.5.6_8080")
 	}
-	f = l.FilterChains[0].Filters[0]
+	f = l.FilterChains[1].Filters[0]
 	cfg, _ = conversion.MessageToStruct(f.GetTypedConfig())
 	rds = cfg.Fields["rds"].GetStructValue().Fields["route_config_name"].GetStringValue()
 	if rds != "test3.com:8080" {
@@ -781,6 +776,7 @@ func testOutboundListenerFilterTimeout(t *testing.T, services ...*model.Service)
 }
 
 func testOutboundListenerConflict(t *testing.T, services ...*model.Service) {
+	t.Helper()
 	oldestService := getOldestService(services...)
 	p := &fakePlugin{}
 	proxy := getProxy()
@@ -798,18 +794,19 @@ func testOutboundListenerConflict(t *testing.T, services ...*model.Service) {
 			t.Fatalf("expected tcp filter chain, found %s", listeners[0].FilterChains[1].Filters[0].Name)
 		}
 	} else if oldestProtocol != protocol.HTTP && oldestProtocol != protocol.TCP {
-		if len(listeners[0].FilterChains) != 1 {
-			t.Fatalf("expectd %d filter chains, found %d", 1, len(listeners[0].FilterChains))
-		}
-		if !isHTTPFilterChain(listeners[0].FilterChains[0]) {
-			t.Fatalf("expected http filter chain, found %s", listeners[0].FilterChains[0].Filters[0].Name)
+		if len(listeners[0].FilterChains) != 2 {
+			t.Fatalf("expectd %d filter chains, found %d", 2, len(listeners[0].FilterChains))
+		} else {
+			if !isHTTPFilterChain(listeners[0].FilterChains[1]) {
+				t.Fatalf("expected http filter chain, found %s", listeners[0].FilterChains[1].Filters[0].Name)
+			}
+
+			if !isTCPFilterChain(listeners[0].FilterChains[0]) {
+				t.Fatalf("expected tcp filter chain, found %s", listeners[0].FilterChains[2].Filters[0].Name)
+			}
 		}
 
-		if !isTCPFilterChain(listeners[0].DefaultFilterChain) {
-			t.Fatalf("expected tcp filter chain, found %s", listeners[0].DefaultFilterChain.Filters[0].Name)
-		}
-
-		verifyHTTPFilterChainMatch(t, listeners[0].FilterChains[0], model.TrafficDirectionOutbound, false)
+		verifyHTTPFilterChainMatch(t, listeners[0].FilterChains[1], model.TrafficDirectionOutbound, false)
 		verifyListenerFilters(t, listeners[0].ListenerFilters)
 
 		if !listeners[0].ContinueOnListenerFiltersTimeout || listeners[0].ListenerFiltersTimeout == nil {
@@ -818,7 +815,7 @@ func testOutboundListenerConflict(t *testing.T, services ...*model.Service) {
 				listeners[0].ListenerFiltersTimeout)
 		}
 
-		f := listeners[0].FilterChains[0].Filters[0]
+		f := listeners[0].FilterChains[1].Filters[0]
 		cfg, _ := conversion.MessageToStruct(f.GetTypedConfig())
 		rds := cfg.Fields["rds"].GetStructValue().Fields["route_config_name"].GetStringValue()
 		expect := fmt.Sprintf("%d", oldestService.Ports[0].Port)
@@ -826,11 +823,8 @@ func testOutboundListenerConflict(t *testing.T, services ...*model.Service) {
 			t.Fatalf("expect routes %s, found %s", expect, rds)
 		}
 	} else {
-		if len(listeners[0].FilterChains) != 1 {
-			t.Fatalf("expectd %d filter chains, found %d", 1, len(listeners[0].FilterChains))
-		}
-		if listeners[0].DefaultFilterChain == nil {
-			t.Fatalf("expected default filter chains, found none")
+		if len(listeners[0].FilterChains) != 2 {
+			t.Fatalf("expectd %d filter chains, found %d", 2, len(listeners[0].FilterChains))
 		}
 
 		_ = getTCPFilterChain(t, listeners[0])
@@ -847,17 +841,9 @@ func testOutboundListenerConflict(t *testing.T, services ...*model.Service) {
 	}
 }
 
-func getFilterChains(l *listener.Listener) []*listener.FilterChain {
-	res := l.FilterChains
-	if l.DefaultFilterChain != nil {
-		res = append(res, l.DefaultFilterChain)
-	}
-	return res
-}
-
 func getTCPFilterChain(t *testing.T, l *listener.Listener) *listener.FilterChain {
 	t.Helper()
-	for _, fc := range getFilterChains(l) {
+	for _, fc := range l.FilterChains {
 		for _, f := range fc.Filters {
 			if f.Name == wellknown.TCPProxy {
 				return fc
@@ -870,7 +856,7 @@ func getTCPFilterChain(t *testing.T, l *listener.Listener) *listener.FilterChain
 
 func getHTTPFilterChain(t *testing.T, l *listener.Listener) *listener.FilterChain {
 	t.Helper()
-	for _, fc := range getFilterChains(l) {
+	for _, fc := range l.FilterChains {
 		for _, f := range fc.Filters {
 			if f.Name == wellknown.HTTPConnectionManager {
 				return fc
@@ -883,7 +869,7 @@ func getHTTPFilterChain(t *testing.T, l *listener.Listener) *listener.FilterChai
 
 func testInboundListenerConfig(t *testing.T, proxy *model.Proxy, services ...*model.Service) {
 	t.Helper()
-	p := registry.NewPlugins([]string{plugin.Authn})[0]
+	p := &fakePlugin{}
 	listeners := buildInboundListeners(t, p, proxy, nil, services...)
 	if len(listeners) != 1 {
 		t.Fatalf("expected %d listeners, found %d", 1, len(listeners))
@@ -909,9 +895,9 @@ func testInboundListenerConfigWithGrpc(t *testing.T, proxy *model.Proxy, service
 
 func testInboundListenerConfigWithSidecar(t *testing.T, proxy *model.Proxy, services ...*model.Service) {
 	t.Helper()
-	p := registry.NewPlugins([]string{plugin.Authn})[0]
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
+	p := &fakePlugin{}
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -938,10 +924,9 @@ func testInboundListenerConfigWithSidecar(t *testing.T, proxy *model.Proxy, serv
 
 func testInboundListenerConfigWithSidecarWithoutServices(t *testing.T, proxy *model.Proxy) {
 	t.Helper()
-
-	p := registry.NewPlugins([]string{plugin.Authn})[0]
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
+	p := &fakePlugin{}
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo-without-service",
 			Namespace: "not-default",
 		},
@@ -1004,8 +989,8 @@ func verifyHTTPFilterChainMatch(t *testing.T, fc *listener.FilterChain, directio
 				len(plaintextHTTPALPNs), plaintextHTTPALPNs, fc.FilterChainMatch.ApplicationProtocols)
 		}
 
-		if fc.FilterChainMatch.TransportProtocol != xdsfilters.RawBufferTransportProtocol {
-			t.Fatalf("exepct %q transport protocol, found %q", xdsfilters.RawBufferTransportProtocol, fc.FilterChainMatch.TransportProtocol)
+		if fc.FilterChainMatch.TransportProtocol != "" {
+			t.Fatalf("exepct %q transport protocol, found %q", "", fc.FilterChainMatch.TransportProtocol)
 		}
 	}
 
@@ -1060,11 +1045,10 @@ func isTCPFilterChain(fc *listener.FilterChain) bool {
 func testOutboundListenerConfigWithSidecar(t *testing.T, services ...*model.Service) {
 	t.Helper()
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
-			Name:             "foo",
-			Namespace:        "not-default",
-			GroupVersionKind: gvk.Sidecar,
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "foo",
+			Namespace: "not-default",
 		},
 		Spec: &networking.Sidecar{
 			Egress: []*networking.IstioEgressListener{
@@ -1112,19 +1096,20 @@ func testOutboundListenerConfigWithSidecar(t *testing.T, services ...*model.Serv
 	}
 
 	l := findListenerByPort(listeners, 8080)
-	if len(l.FilterChains) != 1 {
-		t.Fatalf("expectd %d filter chains, found %d", 1, len(l.FilterChains))
-	}
-	if !isHTTPFilterChain(l.FilterChains[0]) {
-		t.Fatalf("expected http filter chain, found %s", l.FilterChains[0].Filters[0].Name)
-	}
+	if len(l.FilterChains) != 2 {
+		t.Fatalf("expectd %d filter chains, found %d", 2, len(l.FilterChains))
+	} else {
+		if !isHTTPFilterChain(l.FilterChains[1]) {
+			t.Fatalf("expected http filter chain, found %s", l.FilterChains[1].Filters[0].Name)
+		}
 
-	if !isTCPFilterChain(l.DefaultFilterChain) {
-		t.Fatalf("expected tcp filter chain, found %s", l.DefaultFilterChain.Filters[0].Name)
-	}
+		if !isTCPFilterChain(l.FilterChains[0]) {
+			t.Fatalf("expected tcp filter chain, found %s", l.FilterChains[0].Filters[0].Name)
+		}
 
-	verifyHTTPFilterChainMatch(t, l.FilterChains[0], model.TrafficDirectionOutbound, false)
-	verifyListenerFilters(t, l.ListenerFilters)
+		verifyHTTPFilterChainMatch(t, l.FilterChains[1], model.TrafficDirectionOutbound, false)
+		verifyListenerFilters(t, l.ListenerFilters)
+	}
 
 	if l := findListenerByPort(listeners, 3306); !isMysqlListener(l) {
 		t.Fatalf("expected MySQL listener on port 3306, found %v", l)
@@ -1142,18 +1127,19 @@ func testOutboundListenerConfigWithSidecar(t *testing.T, services ...*model.Serv
 	}
 
 	l = findListenerByPort(listeners, 8888)
-	if len(l.FilterChains) != 1 {
-		t.Fatalf("expected %d filter chains, found %d", 1, len(l.FilterChains))
-	}
-	if !isHTTPFilterChain(l.FilterChains[0]) {
-		t.Fatalf("expected http filter chain, found %s", l.FilterChains[0].Filters[0].Name)
+	if len(l.FilterChains) != 2 {
+		t.Fatalf("expectd %d filter chains, found %d", 2, len(l.FilterChains))
+	} else {
+		if !isHTTPFilterChain(l.FilterChains[1]) {
+			t.Fatalf("expected http filter chain, found %s", l.FilterChains[0].Filters[0].Name)
+		}
+
+		if !isTCPFilterChain(l.FilterChains[0]) {
+			t.Fatalf("expected tcp filter chain, found %s", l.FilterChains[1].Filters[0].Name)
+		}
 	}
 
-	if !isTCPFilterChain(l.DefaultFilterChain) {
-		t.Fatalf("expected tcp filter chain, found %s", l.DefaultFilterChain.Filters[0].Name)
-	}
-
-	verifyHTTPFilterChainMatch(t, l.FilterChains[0], model.TrafficDirectionOutbound, false)
+	verifyHTTPFilterChainMatch(t, l.FilterChains[1], model.TrafficDirectionOutbound, false)
 	verifyListenerFilters(t, l.ListenerFilters)
 }
 
@@ -1196,8 +1182,8 @@ func testInboundListenerConfigWithoutServicesWithHTTP10Proxy(t *testing.T, proxy
 func testInboundListenerConfigWithSidecarWithHTTP10Proxy(t *testing.T, proxy *model.Proxy, services ...*model.Service) {
 	t.Helper()
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -1231,8 +1217,8 @@ func testInboundListenerConfigWithSidecarWithHTTP10Proxy(t *testing.T, proxy *mo
 func testInboundListenerConfigWithSidecarWithoutServicesWithHTTP10Proxy(t *testing.T, proxy *model.Proxy) {
 	t.Helper()
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo-without-service",
 			Namespace: "not-default",
 		},
@@ -1265,11 +1251,10 @@ func testInboundListenerConfigWithSidecarWithoutServicesWithHTTP10Proxy(t *testi
 func testOutboundListenerConfigWithSidecarWithSniffingDisabled(t *testing.T, services ...*model.Service) {
 	t.Helper()
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
-			Name:             "foo",
-			Namespace:        "not-default",
-			GroupVersionKind: gvk.Sidecar,
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "foo",
+			Namespace: "not-default",
 		},
 		Spec: &networking.Sidecar{
 			Egress: []*networking.IstioEgressListener{
@@ -1316,11 +1301,10 @@ func testOutboundListenerConfigWithSidecarWithSniffingDisabled(t *testing.T, ser
 func testOutboundListenerConfigWithSidecarWithUseRemoteAddress(t *testing.T, services ...*model.Service) {
 	t.Helper()
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
-			Name:             "foo",
-			Namespace:        "not-default",
-			GroupVersionKind: gvk.Sidecar,
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "foo",
+			Namespace: "not-default",
 		},
 		Spec: &networking.Sidecar{
 			Egress: []*networking.IstioEgressListener{
@@ -1360,11 +1344,10 @@ func testOutboundListenerConfigWithSidecarWithUseRemoteAddress(t *testing.T, ser
 func testOutboundListenerConfigWithSidecarWithCaptureModeNone(t *testing.T, services ...*model.Service) {
 	t.Helper()
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
-			Name:             "foo",
-			Namespace:        "not-default",
-			GroupVersionKind: gvk.Sidecar,
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "foo",
+			Namespace: "not-default",
 		},
 		Spec: &networking.Sidecar{
 			Egress: []*networking.IstioEgressListener{
@@ -1447,7 +1430,7 @@ func TestOutboundListenerAccessLogs(t *testing.T) {
 	p := &fakePlugin{}
 	env := buildListenerEnv(nil)
 	env.Mesh().AccessLogFile = "foo"
-	listeners := buildAllListeners(p, env)
+	listeners := buildAllListeners(p, nil, env)
 	found := false
 	for _, l := range listeners {
 		if l.Name == VirtualOutboundListenerName {
@@ -1470,48 +1453,13 @@ func TestOutboundListenerAccessLogs(t *testing.T) {
 	env.Mesh().AccessLogFormat = "format modified"
 
 	// Trigger MeshConfig change and validate that access log is recomputed.
-	accessLogBuilder.reset()
+	resetCachedListenerConfig(nil)
 
 	// Validate that access log filter users the new format.
-	listeners = buildAllListeners(p, env)
+	listeners = buildAllListeners(p, nil, env)
 	for _, l := range listeners {
 		if l.Name == VirtualOutboundListenerName {
 			validateAccessLog(t, l, "format modified")
-		}
-	}
-}
-
-func TestListenerAccessLogs(t *testing.T) {
-	t.Helper()
-	p := &fakePlugin{}
-	env := buildListenerEnv(nil)
-	env.Mesh().AccessLogFile = "foo"
-	listeners := buildAllListeners(p, env)
-	for _, l := range listeners {
-
-		if l.AccessLog == nil {
-			t.Fatalf("expected access log configuration for %v", l)
-		}
-		if l.AccessLog[0].Filter == nil {
-			t.Fatal("expected filter config in listener access log configuration")
-		}
-	}
-	// Update MeshConfig
-	env.Mesh().AccessLogFormat = "format modified"
-
-	// Trigger MeshConfig change and validate that access log is recomputed.
-	accessLogBuilder.reset()
-
-	// Validate that access log filter users the new format.
-	listeners = buildAllListeners(p, env)
-	for _, l := range listeners {
-		if l.AccessLog[0].Filter == nil {
-			t.Fatal("expected filter config in listener access log configuration")
-		}
-		cfg, _ := conversion.MessageToStruct(l.AccessLog[0].GetTypedConfig())
-		textFormat := cfg.GetFields()["log_format"].GetStructValue().GetFields()["text_format"].GetStringValue()
-		if textFormat != env.Mesh().AccessLogFormat {
-			t.Fatalf("expected format to be %s, but got %s", env.Mesh().AccessLogFormat, textFormat)
 		}
 	}
 }
@@ -1526,15 +1474,14 @@ func validateAccessLog(t *testing.T, l *listener.Listener, format string) {
 		t.Fatal("expected access log configuration")
 	}
 	cfg, _ := conversion.MessageToStruct(fc.AccessLog[0].GetTypedConfig())
-	textFormat := cfg.GetFields()["log_format"].GetStructValue().GetFields()["text_format"].GetStringValue()
-	if textFormat != format {
-		t.Fatalf("expected format to be %s, but got %s", format, textFormat)
+	if cfg.GetFields()["format"].GetStringValue() != format {
+		t.Fatalf("expected format to be %s, but got %s", format, cfg.GetFields()["format"].GetStringValue())
 	}
 }
 
 func TestHttpProxyListener(t *testing.T) {
 	p := &fakePlugin{}
-	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
 
 	env := buildListenerEnv(nil)
 	if err := env.PushContext.InitContext(&env, nil, nil); err != nil {
@@ -1563,12 +1510,12 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		name             string
 		in               *meshconfig.Tracing
 		out              *hcm.HttpConnectionManager_Tracing
-		tproxy           *model.Proxy
+		tproxy           model.Proxy
 		envPilotSampling float64
 	}{
 		{
 			name:             "random-sampling-env",
-			tproxy:           getProxy(),
+			tproxy:           *getProxy(),
 			envPilotSampling: 80.0,
 			in: &meshconfig.Tracing{
 				Tracer:           nil,
@@ -1591,7 +1538,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 		{
 			name:             "random-sampling-env-and-meshconfig",
-			tproxy:           getProxy(),
+			tproxy:           *getProxy(),
 			envPilotSampling: 80.0,
 			in: &meshconfig.Tracing{
 				Tracer:           nil,
@@ -1614,7 +1561,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 		{
 			name:             "random-sampling-too-low-env",
-			tproxy:           getProxy(),
+			tproxy:           *getProxy(),
 			envPilotSampling: -1,
 			in: &meshconfig.Tracing{
 				Tracer:           nil,
@@ -1637,7 +1584,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 		{
 			name:             "random-sampling-too-high-meshconfig",
-			tproxy:           getProxy(),
+			tproxy:           *getProxy(),
 			envPilotSampling: 80.0,
 			in: &meshconfig.Tracing{
 				Tracer:           nil,
@@ -1660,7 +1607,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 		{
 			name:             "random-sampling-too-high-env",
-			tproxy:           getProxy(),
+			tproxy:           *getProxy(),
 			envPilotSampling: 2000.0,
 			in: &meshconfig.Tracing{
 				Tracer:           nil,
@@ -1685,7 +1632,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 			// upstream will set the default to 256 per
 			// its documentation
 			name:   "tag-max-path-length-not-set-default",
-			tproxy: getProxy(),
+			tproxy: *getProxy(),
 			in: &meshconfig.Tracing{
 				Tracer:           nil,
 				CustomTags:       nil,
@@ -1707,7 +1654,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 		{
 			name:   "tag-max-path-length-set-to-1024",
-			tproxy: getProxy(),
+			tproxy: *getProxy(),
 			in: &meshconfig.Tracing{
 				Tracer:           nil,
 				CustomTags:       nil,
@@ -1731,7 +1678,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 		{
 			name:   "custom-tags-sidecar",
-			tproxy: getProxy(),
+			tproxy: *getProxy(),
 			in: &meshconfig.Tracing{
 				CustomTags: map[string]*meshconfig.Tracing_CustomTag{
 					"custom_tag_env": {
@@ -1803,7 +1750,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 		{
 			name:   "custom-tracing-gateways",
-			tproxy: &proxyGateway,
+			tproxy: proxyGateway,
 			in: &meshconfig.Tracing{
 				MaxPathTagLength: 100,
 				CustomTags: map[string]*meshconfig.Tracing_CustomTag{
@@ -1845,7 +1792,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		},
 	}
 	p := &fakePlugin{}
-	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
 
 	for _, tc := range customTagsTest {
 		featuresSet := false
@@ -1872,7 +1819,7 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
 		}
 
 		tc.tproxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
-		httpProxy := configgen.buildHTTPProxy(tc.tproxy, env.PushContext)
+		httpProxy := configgen.buildHTTPProxy(&tc.tproxy, env.PushContext)
 
 		f := httpProxy.FilterChains[0].Filters[0]
 		verifyHTTPConnectionManagerFilter(t, f, tc.out, tc.name)
@@ -1907,12 +1854,13 @@ func TestOutboundListenerConfig_TCPFailThrough(t *testing.T) {
 		buildService("test1.com", wildcardIP, protocol.HTTP, tnow)}
 	listeners := buildOutboundListeners(t, &fakePlugin{}, getProxy(), nil, nil, services...)
 
-	if len(listeners[0].FilterChains) != 1 {
-		t.Fatalf("expectd %d filter chains, found %d", 1, len(listeners[0].FilterChains))
+	if len(listeners[0].FilterChains) != 2 {
+		t.Fatalf("expectd %d filter chains, found %d", 2, len(listeners[0].FilterChains))
 	}
 
 	verifyHTTPFilterChainMatch(t, listeners[0].FilterChains[0], model.TrafficDirectionOutbound, false)
-	verifyPassThroughTCPFilterChain(t, listeners[0].DefaultFilterChain)
+	verifyPassThroughTCPFilterChain(t, listeners[0].FilterChains[1])
+
 	verifyListenerFilters(t, listeners[0].ListenerFilters)
 }
 
@@ -2098,8 +2046,8 @@ func getOldestService(services ...*model.Service) *model.Service {
 	return oldestService
 }
 
-func buildAllListeners(p plugin.Plugin, env model.Environment) []*listener.Listener {
-	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+func buildAllListeners(p plugin.Plugin, sidecarConfig *model.Config, env model.Environment) []*listener.Listener {
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
 
 	if err := env.PushContext.InitContext(&env, nil, nil); err != nil {
 		return nil
@@ -2107,9 +2055,13 @@ func buildAllListeners(p plugin.Plugin, env model.Environment) []*listener.Liste
 
 	proxy := getProxy()
 	proxy.ServiceInstances = nil
-	proxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
+	if sidecarConfig == nil {
+		proxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
+	} else {
+		proxy.SidecarScope = model.ConvertToSidecarScope(env.PushContext, sidecarConfig, sidecarConfig.Namespace)
+	}
 	builder := NewListenerBuilder(proxy, env.PushContext)
-	return configgen.buildSidecarListeners(builder).getListeners()
+	return configgen.buildSidecarListeners(env.PushContext, builder).getListeners()
 }
 
 func getFilterConfig(filter *listener.Filter, out proto.Message) error {
@@ -2122,27 +2074,49 @@ func getFilterConfig(filter *listener.Filter, out proto.Message) error {
 	return nil
 }
 
-func buildOutboundListeners(t *testing.T, p plugin.Plugin, proxy *model.Proxy, sidecarConfig *config.Config,
-	virtualService *config.Config, services ...*model.Service) []*listener.Listener {
+func buildOutboundListeners(t *testing.T, p plugin.Plugin, proxy *model.Proxy, sidecarConfig *model.Config,
+	virtualService *model.Config, services ...*model.Service) []*listener.Listener {
 	t.Helper()
-	cg := NewConfigGenTest(t, TestOptions{
-		Services:       services,
-		ConfigPointers: []*config.Config{sidecarConfig, virtualService},
-		Plugins:        []plugin.Plugin{p},
-	})
-	listeners := cg.ConfigGen.buildSidecarOutboundListeners(cg.SetupProxy(proxy), cg.env.PushContext)
-	xdstest.ValidateListeners(t, listeners)
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
+
+	var env model.Environment
+	if virtualService != nil {
+		env = buildListenerEnvWithVirtualServices(services, []*model.Config{virtualService})
+	} else {
+		env = buildListenerEnv(services)
+	}
+
+	if err := env.PushContext.InitContext(&env, nil, nil); err != nil {
+		return nil
+	}
+
+	proxy.IstioVersion = model.ParseIstioVersion(proxy.Metadata.IstioVersion)
+	if sidecarConfig == nil {
+		proxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
+	} else {
+		proxy.SidecarScope = model.ConvertToSidecarScope(env.PushContext, sidecarConfig, sidecarConfig.Namespace)
+	}
+	proxy.ServiceInstances = proxyInstances
+
+	listeners := configgen.buildSidecarOutboundListeners(proxy, env.PushContext)
+	for _, l := range listeners {
+		if err := l.Validate(); err != nil {
+			t.Fatalf("Listener %s failed validation with error  %v", l.Name, err)
+		}
+	}
 	return listeners
 }
 
-func buildInboundListeners(t *testing.T, p plugin.Plugin, proxy *model.Proxy, sidecarConfig *config.Config, services ...*model.Service) []*listener.Listener {
+func buildInboundListeners(t *testing.T, p plugin.Plugin, proxy *model.Proxy, sidecarConfig *model.Config, services ...*model.Service) []*listener.Listener {
 	t.Helper()
-	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
 	env := buildListenerEnv(services)
 	if err := env.PushContext.InitContext(&env, nil, nil); err != nil {
 		return nil
 	}
-	proxy.SetServiceInstances(&env)
+	if err := proxy.SetServiceInstances(&env); err != nil {
+		return nil
+	}
 
 	proxy.IstioVersion = model.ParseIstioVersion(proxy.Metadata.IstioVersion)
 	if sidecarConfig == nil {
@@ -2151,7 +2125,11 @@ func buildInboundListeners(t *testing.T, p plugin.Plugin, proxy *model.Proxy, si
 		proxy.SidecarScope = model.ConvertToSidecarScope(env.PushContext, sidecarConfig, sidecarConfig.Namespace)
 	}
 	listeners := configgen.buildSidecarInboundListeners(proxy, env.PushContext)
-	xdstest.ValidateListeners(t, listeners)
+	for _, l := range listeners {
+		if err := l.Validate(); err != nil {
+			t.Fatalf("Listener %s failed validation with error  %v", l.Name, err)
+		}
+	}
 	return listeners
 }
 
@@ -2166,8 +2144,28 @@ func (p *fakePlugin) OnOutboundListener(in *plugin.InputParams, mutable *istione
 	return nil
 }
 
+func (p *fakePlugin) OnOutboundPassthroughFilterChain(in *plugin.InputParams, mutable *istionetworking.MutableObjects) error {
+	return nil
+}
+
 func (p *fakePlugin) OnInboundListener(in *plugin.InputParams, mutable *istionetworking.MutableObjects) error {
 	return nil
+}
+
+func (p *fakePlugin) OnVirtualListener(in *plugin.InputParams, mutable *istionetworking.MutableObjects) error {
+	return nil
+}
+
+func (p *fakePlugin) OnOutboundCluster(in *plugin.InputParams, cluster *cluster.Cluster) {
+}
+
+func (p *fakePlugin) OnInboundCluster(in *plugin.InputParams, cluster *cluster.Cluster) {
+}
+
+func (p *fakePlugin) OnOutboundRouteConfiguration(in *plugin.InputParams, routeConfiguration *route.RouteConfiguration) {
+}
+
+func (p *fakePlugin) OnInboundRouteConfiguration(in *plugin.InputParams, routeConfiguration *route.RouteConfiguration) {
 }
 
 func (p *fakePlugin) OnInboundFilterChains(in *plugin.InputParams) []istionetworking.FilterChain {
@@ -2320,7 +2318,7 @@ func buildListenerEnv(services []*model.Service) model.Environment {
 	return buildListenerEnvWithVirtualServices(services, nil)
 }
 
-func buildListenerEnvWithVirtualServices(services []*model.Service, virtualServices []*config.Config) model.Environment {
+func buildListenerEnvWithVirtualServices(services []*model.Service, virtualServices []*model.Config) model.Environment {
 	serviceDiscovery := memregistry.NewServiceDiscovery(services)
 
 	instances := make([]*model.ServiceInstance, 0, len(services))
@@ -2339,8 +2337,8 @@ func buildListenerEnvWithVirtualServices(services []*model.Service, virtualServi
 	// TODO stop faking this. proxy ip must match the instance IP
 	serviceDiscovery.WantGetProxyServiceInstances = instances
 
-	envoyFilter := config.Config{
-		Meta: config.Meta{
+	envoyFilter := model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:             "test-envoyfilter",
 			Namespace:        "not-default",
 			GroupVersionKind: gvk.EnvoyFilter,
@@ -2422,18 +2420,18 @@ func TestAppendListenerFallthroughRouteForCompleteListener(t *testing.T) {
 			hostname: util.PassthroughCluster,
 		},
 	}
-	configgen := NewConfigGenerator([]plugin.Plugin{}, &model.DisabledCache{})
+	configgen := NewConfigGenerator([]plugin.Plugin{})
 	for idx := range tests {
 		t.Run(tests[idx].name, func(t *testing.T) {
 			configgen.appendListenerFallthroughRouteForCompleteListener(tests[idx].listener,
 				tests[idx].node, push)
-			if len(tests[idx].listener.FilterChains) != 0 {
-				t.Errorf("Expected exactly 0 filter chain")
+			if len(tests[idx].listener.FilterChains) != 1 {
+				t.Errorf("Expected exactly 1 filter chain")
 			}
-			if len(tests[idx].listener.DefaultFilterChain.Filters) != 1 {
+			if len(tests[idx].listener.FilterChains[0].Filters) != 1 {
 				t.Errorf("Expected exactly 1 network filter in the chain")
 			}
-			filter := tests[idx].listener.DefaultFilterChain.Filters[0]
+			filter := tests[idx].listener.FilterChains[0].Filters[0]
 			var tcpProxy tcp.TcpProxy
 			cfg := filter.GetTypedConfig()
 			_ = ptypes.UnmarshalAny(cfg, &tcpProxy)
@@ -2442,6 +2440,9 @@ func TestAppendListenerFallthroughRouteForCompleteListener(t *testing.T) {
 			}
 			if tcpProxy.GetCluster() != tests[idx].hostname {
 				t.Errorf("Expected cluster %s but got %s\n", tests[idx].hostname, tcpProxy.GetCluster())
+			}
+			if len(tests[idx].listener.FilterChains) != 1 {
+				t.Errorf("Expected exactly 1 filter chain on the tests[idx].listener")
 			}
 		})
 	}
@@ -2546,13 +2547,15 @@ func TestMergeTCPFilterChains(t *testing.T) {
 		Hostname: "bar.com",
 	}
 
-	opts := buildListenerOpts{
-		proxy:   node,
-		push:    push,
-		service: &svc,
+	params := &plugin.InputParams{
+		ListenerProtocol: istionetworking.ListenerProtocolTCP,
+		Node:             node,
+		Port:             svcPort,
+		ServiceInstance:  &model.ServiceInstance{Service: &svc},
+		Push:             push,
 	}
 
-	out := mergeTCPFilterChains(incomingFilterChains, opts, "0.0.0.0_443", listenerMap)
+	out := mergeTCPFilterChains(incomingFilterChains, params, "0.0.0.0_443", listenerMap)
 
 	if len(out) != 4 {
 		t.Errorf("Got %d filter chains, expected 3", len(out))
@@ -2567,7 +2570,6 @@ func TestMergeTCPFilterChains(t *testing.T) {
 }
 
 func TestOutboundRateLimitedThriftListenerConfig(t *testing.T) {
-	t.Skip("https://github.com/istio/istio/issues/25725")
 	svcName := "thrift-service-unlimited"
 	svcIP := "127.0.22.2"
 	limitedSvcName := "thrift-service"
@@ -2582,8 +2584,8 @@ func TestOutboundRateLimitedThriftListenerConfig(t *testing.T) {
 		buildService(limitedSvcName+".default.svc.cluster.local", limitedSvcIP, protocol.Thrift, tnow)}
 
 	p := &fakePlugin{}
-	sidecarConfig := &config.Config{
-		Meta: config.Meta{
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -2598,11 +2600,45 @@ func TestOutboundRateLimitedThriftListenerConfig(t *testing.T) {
 		},
 	}
 
-	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
 
 	serviceDiscovery := memregistry.NewServiceDiscovery(services)
 
-	configStore := model.MakeIstioStore(memory.MakeSkipValidation(collections.Pilot, true))
+	configStore := model.MakeIstioStore(memory.MakeWithoutValidation(collections.Pilot))
+	for _, config := range []model.Config{
+		{
+			ConfigMeta: model.ConfigMeta{
+				GroupVersionKind: gvk.QuotaSpec,
+				Name:             limitedSvcName,
+				Namespace:        "default",
+			},
+			Spec: &mixerClient.QuotaSpec{},
+		},
+		{
+			ConfigMeta: model.ConfigMeta{
+				GroupVersionKind: gvk.QuotaSpecBinding,
+				Name:             limitedSvcName,
+				Namespace:        "default",
+			},
+			Spec: &mixerClient.QuotaSpecBinding{
+				Services: []*mixerClient.IstioService{
+					{
+						Service: "thrift-service.default.svc.cluster.local",
+					},
+				},
+				QuotaSpecs: []*mixerClient.QuotaSpecBinding_QuotaSpecReference{
+					{
+						Name:      "thrift-service",
+						Namespace: "default",
+					},
+				},
+			},
+		},
+	} {
+		if _, err := configStore.Create(config); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	m := mesh.DefaultMeshConfig()
 	m.ThriftConfig.RateLimitUrl = "ratelimit.svc.cluster.local"

@@ -20,30 +20,33 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sort"
+	"strings"
 	"time"
 
-	ingress "k8s.io/api/networking/v1beta1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/informers/networking/v1beta1"
+
+	"istio.io/pkg/ledger"
+
+	ingress "k8s.io/api/networking/v1beta1"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
+	"istio.io/pkg/env"
+	"istio.io/pkg/log"
+
 	"istio.io/istio/pilot/pkg/model"
 	kubecontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/config/schema/resource"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/queue"
-	"istio.io/pkg/env"
-	"istio.io/pkg/log"
 )
 
 // In 1.0, the Gateway is defined in the namespace where the actual controller runs, and needs to be managed by
@@ -83,8 +86,8 @@ type controller struct {
 	domainSuffix string
 
 	queue                  queue.Instance
-	virtualServiceHandlers []func(config.Config, config.Config, model.Event)
-	gatewayHandlers        []func(config.Config, config.Config, model.Event)
+	virtualServiceHandlers []func(model.Config, model.Config, model.Event)
+	gatewayHandlers        []func(model.Config, model.Config, model.Event)
 
 	ingressInformer cache.SharedInformer
 	serviceInformer cache.SharedInformer
@@ -102,23 +105,17 @@ var (
 	errUnsupportedOp = errors.New("unsupported operation: the ingress config store is a read-only view")
 )
 
-// Check if the "networking" group Ingress is available. Implementation borrowed from ingress-nginx
-func NetworkingIngressAvailable(client kubernetes.Interface) bool {
-	// check kubernetes version to use new ingress package or not
-	version118, _ := version.ParseGeneric("v1.18.0")
-
-	serverVersion, err := client.Discovery().ServerVersion()
-	if err != nil {
-		return false
+func ingressClassSupported(client kubernetes.Interface) bool {
+	_, s, _ := client.Discovery().ServerGroupsAndResources()
+	// This may fail if any api service is down, but the result will still be populated, so we skip the error
+	for _, res := range s {
+		for _, api := range res.APIResources {
+			if api.Kind == "IngressClass" && strings.HasPrefix(res.GroupVersion, "networking.k8s.io/") {
+				return true
+			}
+		}
 	}
-
-	runningVersion, err := version.ParseGeneric(serverVersion.String())
-	if err != nil {
-		log.Errorf("unexpected error parsing running Kubernetes version: %v", err)
-		return false
-	}
-
-	return runningVersion.AtLeast(version118)
+	return false
 }
 
 // NewController creates a new Kubernetes controller
@@ -133,11 +130,12 @@ func NewController(client kube.Client, meshWatcher mesh.Holder,
 	}
 
 	ingressInformer := client.KubeInformer().Networking().V1beta1().Ingresses().Informer()
+	log.Infof("Ingress controller watching namespaces %q", options.WatchedNamespaces)
 
 	serviceInformer := client.KubeInformer().Core().V1().Services()
 
 	var classes v1beta1.IngressClassInformer
-	if NetworkingIngressAvailable(client) {
+	if ingressClassSupported(client) {
 		classes = client.KubeInformer().Networking().V1beta1().IngressClasses()
 		// Register the informer now, so it will be properly started
 		_ = classes.Informer()
@@ -209,15 +207,15 @@ func (c *controller) onEvent(obj interface{}, event model.Event) error {
 	// Trigger updates for Gateway and VirtualService
 	// TODO: we could be smarter here and only trigger when real changes were found
 	for _, f := range c.virtualServiceHandlers {
-		f(config.Config{}, config.Config{
-			Meta: config.Meta{
+		f(model.Config{}, model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.VirtualService,
 			},
 		}, event)
 	}
 	for _, f := range c.gatewayHandlers {
-		f(config.Config{}, config.Config{
-			Meta: config.Meta{
+		f(model.Config{}, model.Config{
+			ConfigMeta: model.ConfigMeta{
 				GroupVersionKind: gvk.Gateway,
 			},
 		}, event)
@@ -226,13 +224,30 @@ func (c *controller) onEvent(obj interface{}, event model.Event) error {
 	return nil
 }
 
-func (c *controller) RegisterEventHandler(kind config.GroupVersionKind, f func(config.Config, config.Config, model.Event)) {
+func (c *controller) RegisterEventHandler(kind resource.GroupVersionKind, f func(model.Config, model.Config, model.Event)) {
 	switch kind {
 	case gvk.VirtualService:
 		c.virtualServiceHandlers = append(c.virtualServiceHandlers, f)
 	case gvk.Gateway:
 		c.gatewayHandlers = append(c.gatewayHandlers, f)
 	}
+}
+
+func (c *controller) Version() string {
+	panic("implement me")
+}
+
+func (c *controller) GetResourceAtVersion(string, string) (resourceVersion string, err error) {
+	panic("implement me")
+}
+
+func (c *controller) GetLedger() ledger.Ledger {
+	log.Warnf("GetLedger: %s", errors.New("this operation is not supported by kube ingress controller"))
+	return nil
+}
+
+func (c *controller) SetLedger(ledger.Ledger) error {
+	return errors.New("this SetLedger operation is not supported by kube ingress controller")
 }
 
 func (c *controller) HasSynced() bool {
@@ -253,41 +268,22 @@ func (c *controller) Schemas() collection.Schemas {
 	return schemas
 }
 
-func (c *controller) Get(typ config.GroupVersionKind, name, namespace string) *config.Config {
+func (c *controller) Get(typ resource.GroupVersionKind, name, namespace string) *model.Config {
 	return nil
 }
 
-// sortIngressByCreationTime sorts the list of config objects in ascending order by their creation time (if available).
-func sortIngressByCreationTime(configs []interface{}) []*ingress.Ingress {
-	ingr := make([]*ingress.Ingress, 0, len(configs))
-	for _, i := range configs {
-		ingr = append(ingr, i.(*ingress.Ingress))
-	}
-	sort.SliceStable(ingr, func(i, j int) bool {
-		// If creation time is the same, then behavior is nondeterministic. In this case, we can
-		// pick an arbitrary but consistent ordering based on name and namespace, which is unique.
-		// CreationTimestamp is stored in seconds, so this is not uncommon.
-		if ingr[i].CreationTimestamp == ingr[j].CreationTimestamp {
-			in := ingr[i].Name + "." + ingr[i].Namespace
-			jn := ingr[j].Name + "." + ingr[j].Namespace
-			return in < jn
-		}
-		return ingr[i].CreationTimestamp.Before(&ingr[j].CreationTimestamp)
-	})
-	return ingr
-}
-
-func (c *controller) List(typ config.GroupVersionKind, namespace string) ([]config.Config, error) {
+func (c *controller) List(typ resource.GroupVersionKind, namespace string) ([]model.Config, error) {
 	if typ != gvk.Gateway &&
 		typ != gvk.VirtualService {
 		return nil, errUnsupportedOp
 	}
 
-	out := make([]config.Config, 0)
+	out := make([]model.Config, 0)
 
-	ingressByHost := map[string]*config.Config{}
+	ingressByHost := map[string]*model.Config{}
 
-	for _, ingress := range sortIngressByCreationTime(c.ingressInformer.GetStore().List()) {
+	for _, obj := range c.ingressInformer.GetStore().List() {
+		ingress := obj.(*ingress.Ingress)
 		if namespace != "" && namespace != ingress.Namespace {
 			continue
 		}
@@ -317,22 +313,14 @@ func (c *controller) List(typ config.GroupVersionKind, namespace string) ([]conf
 	return out, nil
 }
 
-func (c *controller) Create(_ config.Config) (string, error) {
+func (c *controller) Create(_ model.Config) (string, error) {
 	return "", errUnsupportedOp
 }
 
-func (c *controller) Update(_ config.Config) (string, error) {
+func (c *controller) Update(_ model.Config) (string, error) {
 	return "", errUnsupportedOp
 }
 
-func (c *controller) UpdateStatus(config.Config) (string, error) {
-	return "", errUnsupportedOp
-}
-
-func (c *controller) Patch(_ config.GroupVersionKind, _, _ string, _ config.PatchFunc) (string, error) {
-	return "", errUnsupportedOp
-}
-
-func (c *controller) Delete(_ config.GroupVersionKind, _, _ string) error {
+func (c *controller) Delete(_ resource.GroupVersionKind, _, _ string) error {
 	return errUnsupportedOp
 }

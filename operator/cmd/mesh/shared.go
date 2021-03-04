@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package mesh contains types and functions.
+// Package mesh contains types and functions that are used across the full
+// set of mixer commands.
 package mesh
 
 import (
@@ -22,7 +23,6 @@ import (
 	"io/ioutil"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -61,11 +61,7 @@ func initLogsOrExit(_ *rootArgs) {
 	}
 }
 
-var logMutex = sync.Mutex{}
-
 func configLogs(opt *log.Options) error {
-	logMutex.Lock()
-	defer logMutex.Unlock()
 	op := []string{"stderr"}
 	opt2 := *opt
 	opt2.OutputPaths = op
@@ -237,7 +233,7 @@ func getCRAndNamespaceFromFile(filePath string, l clog.Logger) (customResource s
 		return "", "", fmt.Errorf("could not read values from file %s: %s", filePath, err)
 	}
 	customResource = string(b)
-	istioNamespace = mergedIOPS.Namespace
+	istioNamespace = v1alpha1.Namespace(mergedIOPS)
 	return
 }
 
@@ -245,27 +241,19 @@ func getCRAndNamespaceFromFile(filePath string, l clog.Logger) (customResource s
 func createNamespace(cs kubernetes.Interface, namespace string) error {
 	if namespace == "" {
 		// Setup default namespace
-		namespace = istioDefaultNamespace
-	}
-	//check if the namespace already exists. If yes, do nothing. If no, create a new one.
-	_, err := cs.CoreV1().Namespaces().Get(context.TODO(), namespace, v12.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			ns := &v1.Namespace{ObjectMeta: v12.ObjectMeta{
-				Name: namespace,
-				Labels: map[string]string{
-					"istio-injection": "disabled",
-				},
-			}}
-			_, err := cs.CoreV1().Namespaces().Create(context.TODO(), ns, v12.CreateOptions{})
-			if err != nil {
-				return fmt.Errorf("failed to create namespace %v: %v", namespace, err)
-			}
-		} else {
-			return fmt.Errorf("failed to check if namespace %v exists: %v", namespace, err)
-		}
+		namespace = "istio-system"
 	}
 
+	ns := &v1.Namespace{ObjectMeta: v12.ObjectMeta{
+		Name: namespace,
+		Labels: map[string]string{
+			"istio-injection": "disabled",
+		},
+	}}
+	_, err := cs.CoreV1().Namespaces().Create(context.TODO(), ns, v12.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create namespace %v: %v", namespace, err)
+	}
 	return nil
 }
 
@@ -275,5 +263,5 @@ func saveIOPToCluster(reconciler *helmreconciler.HelmReconciler, iop string) err
 	if err != nil {
 		return err
 	}
-	return reconciler.ApplyObject(obj.UnstructuredObject(), false)
+	return reconciler.ApplyObject(obj.UnstructuredObject())
 }

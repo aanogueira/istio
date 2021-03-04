@@ -1,4 +1,3 @@
-// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,33 +17,34 @@ package mtlsfirstpartyjwt
 import (
 	"testing"
 
-	"istio.io/istio/tests/integration/security/util"
-
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/istio"
+	"istio.io/istio/pkg/test/framework/components/pilot"
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
 )
 
 var (
 	inst istio.Instance
-	apps = &util.EchoDeployments{}
+	p    pilot.Instance
 )
 
 func TestMain(m *testing.M) {
 	framework.
 		NewSuite(m).
+		RequireSingleCluster().
 		Label(label.CustomSetup).
 		Setup(istio.Setup(&inst, setupConfig)).
-		Setup(func(ctx resource.Context) error {
-			// TODO: due to issue https://github.com/istio/istio/issues/25286,
-			// currently VM does not work in this test
-			return util.SetupApps(ctx, inst, apps, false)
+		Setup(func(ctx resource.Context) (err error) {
+			if p, err = pilot.New(ctx, pilot.Config{}); err != nil {
+				return err
+			}
+			return nil
 		}).
 		Run()
 }
 
-func setupConfig(_ resource.Context, cfg *istio.Config) {
+func setupConfig(cfg *istio.Config) {
 	if cfg == nil {
 		return
 	}

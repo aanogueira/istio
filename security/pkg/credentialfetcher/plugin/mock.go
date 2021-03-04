@@ -16,8 +16,9 @@
 package plugin
 
 import (
-	"istio.io/istio/pkg/security"
 	"istio.io/pkg/log"
+
+	"istio.io/istio/pkg/security"
 )
 
 var (

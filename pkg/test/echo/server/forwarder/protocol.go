@@ -36,16 +36,15 @@ import (
 	"istio.io/istio/pkg/test/echo/common"
 	"istio.io/istio/pkg/test/echo/common/scheme"
 	"istio.io/istio/pkg/test/echo/proto"
+	"istio.io/pkg/log"
 )
 
 type request struct {
-	URL         string
-	Header      http.Header
-	RequestID   int
-	Message     string
-	Timeout     time.Duration
-	ServerFirst bool
-	Method      string
+	URL       string
+	Header    http.Header
+	RequestID int
+	Message   string
+	Timeout   time.Duration
 }
 
 type protocol interface {
@@ -85,64 +84,51 @@ func newProtocol(cfg Config) (protocol, error) {
 		for _, c := range cert.Certificate {
 			cert, err := x509.ParseCertificate(c)
 			if err != nil {
-				fwLog.Errorf("Failed to parse client certificate: %v", err)
+				log.Errorf("Failed to parse client certificate: %v", err)
 			}
-			fwLog.Debugf("Using client certificate [%s] issued by %s", cert.SerialNumber, cert.Issuer)
+			log.Debugf("Using client certificate [%s] issued by %s", cert.SerialNumber, cert.Issuer)
 			for _, uri := range cert.URIs {
-				fwLog.Debugf("  URI SAN: %s", uri)
+				log.Debugf("  URI SAN: %s", uri)
 			}
 		}
-		// nolint: unparam
 		getClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			fwLog.Debugf("Peer asking for client certificate")
+			log.Debugf("Peer asking for client certificate")
 			for i, ca := range info.AcceptableCAs {
 				x := &pkix.RDNSequence{}
 				if _, err := asn1.Unmarshal(ca, x); err != nil {
-					fwLog.Errorf("Failed to decode AcceptableCA[%d]: %v", i, err)
+					log.Errorf("Failed to decode AcceptableCA[%d]: %v", i, err)
 				} else {
 					name := &pkix.Name{}
 					name.FillFromRDNSequence(x)
-					fwLog.Debugf("  AcceptableCA[%d]: %s", i, name)
+					log.Debugf("  AcceptableCA[%d]: %s", i, name)
 				}
 			}
 
 			return &cert, nil
 		}
 	}
-	tlsConfig := &tls.Config{
-		GetClientCertificate: getClientCertificate,
-	}
-	if cfg.Request.CaCert != "" {
-		certPool := x509.NewCertPool()
-		if !certPool.AppendCertsFromPEM([]byte(cfg.Request.CaCert)) {
-			return nil, fmt.Errorf("failed to create cert pool")
-		}
-		tlsConfig.RootCAs = certPool
-	} else {
-		tlsConfig.InsecureSkipVerify = true
-	}
 
 	switch scheme.Instance(u.Scheme) {
 	case scheme.HTTP, scheme.HTTPS:
-		tlsConfig.NextProtos = []string{"http/1.1"}
 		proto := &httpProtocol{
 			client: &http.Client{
 				Transport: &http.Transport{
-					// We are creating a Transport on each ForwardEcho request. Transport is what holds connections,
-					// so this means every ForwardEcho request will create a new connection. Without setting an idle timeout,
-					// we would never close these connections.
-					IdleConnTimeout: time.Second,
-					TLSClientConfig: tlsConfig,
-					DialContext:     httpDialContext,
+					TLSClientConfig: &tls.Config{
+						GetClientCertificate: getClientCertificate,
+						InsecureSkipVerify:   true,
+					},
+					DialContext: httpDialContext,
 				},
 				Timeout: timeout,
 			},
 			do: cfg.Dialer.HTTP,
 		}
 		if cfg.Request.Http2 && scheme.Instance(u.Scheme) == scheme.HTTPS {
-			tlsConfig.NextProtos = []string{"http/2"}
 			proto.client.Transport = &http2.Transport{
-				TLSClientConfig: tlsConfig,
+				TLSClientConfig: &tls.Config{
+					GetClientCertificate: getClientCertificate,
+					InsecureSkipVerify:   true,
+				},
 				DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
 					return tls.Dial(network, addr, cfg)
 				},
@@ -167,7 +153,11 @@ func newProtocol(cfg Config) (protocol, error) {
 		// transport security
 		security := grpc.WithInsecure()
 		if getClientCertificate != nil {
-			security = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+			security = grpc.WithTransportCredentials(credentials.NewTLS(
+				&tls.Config{
+					GetClientCertificate: getClientCertificate,
+					InsecureSkipVerify:   true,
+				}))
 		}
 
 		// Strip off the scheme from the address.
@@ -179,7 +169,8 @@ func newProtocol(cfg Config) (protocol, error) {
 		grpcConn, err := cfg.Dialer.GRPC(ctx,
 			address,
 			security,
-			grpc.WithAuthority(authority))
+			grpc.WithAuthority(authority),
+			grpc.WithBlock())
 		if err != nil {
 			return nil, err
 		}
@@ -189,7 +180,10 @@ func newProtocol(cfg Config) (protocol, error) {
 		}, nil
 	case scheme.WebSocket:
 		dialer := &websocket.Dialer{
-			TLSClientConfig:  tlsConfig,
+			TLSClientConfig: &tls.Config{
+				GetClientCertificate: getClientCertificate,
+				InsecureSkipVerify:   true,
+			},
 			NetDial:          wsDialContext,
 			HandshakeTimeout: timeout,
 		}
@@ -197,22 +191,29 @@ func newProtocol(cfg Config) (protocol, error) {
 			dialer: dialer,
 		}, nil
 	case scheme.TCP:
+		dialer := net.Dialer{
+			Timeout: timeout,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
+		defer cancel()
+
+		address := rawURL[len(u.Scheme+"://"):]
+
+		var tcpConn net.Conn
+		var err error
+		if getClientCertificate == nil {
+			tcpConn, err = cfg.Dialer.TCP(dialer, ctx, address)
+		} else {
+			tcpConn, err = tls.Dial("tcp", address, &tls.Config{
+				GetClientCertificate: getClientCertificate,
+				InsecureSkipVerify:   true,
+			})
+		}
+		if err != nil {
+			return nil, err
+		}
 		return &tcpProtocol{
-			conn: func() (net.Conn, error) {
-				dialer := net.Dialer{
-					Timeout: timeout,
-				}
-				address := rawURL[len(u.Scheme+"://"):]
-
-				ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
-				defer cancel()
-
-				if getClientCertificate == nil {
-					return cfg.Dialer.TCP(dialer, ctx, address)
-				}
-				return tls.Dial("tcp", address, tlsConfig)
-
-			},
+			conn: tcpConn,
 		}, nil
 	}
 

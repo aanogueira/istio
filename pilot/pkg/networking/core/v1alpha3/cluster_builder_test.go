@@ -23,21 +23,24 @@ import (
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
-	"github.com/golang/protobuf/ptypes/duration"
-	structpb "github.com/golang/protobuf/ptypes/struct"
-	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	meshconfig "istio.io/api/mesh/v1alpha1"
+	"github.com/golang/protobuf/ptypes/duration"
+	structpb "github.com/golang/protobuf/ptypes/struct"
+	"github.com/golang/protobuf/ptypes/wrappers"
+
 	networking "istio.io/api/networking/v1alpha3"
+
+	"istio.io/istio/pilot/pkg/config/memory"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
-	"istio.io/istio/pilot/test/xdstest"
-	"istio.io/istio/pkg/config"
+	memregistry "istio.io/istio/pilot/pkg/serviceregistry/memory"
+	v3 "istio.io/istio/pilot/pkg/xds/v3"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/protocol"
+	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
 )
 
@@ -58,7 +61,7 @@ func TestApplyDestinationRule(t *testing.T) {
 		Namespace: TestServiceNamespace,
 	}
 	service := &model.Service{
-		Hostname:    host.Name("foo.default.svc.cluster.local"),
+		Hostname:    host.Name("foo"),
 		Address:     "1.1.1.1",
 		ClusterVIPs: make(map[string]string),
 		Ports:       servicePort,
@@ -72,6 +75,7 @@ func TestApplyDestinationRule(t *testing.T) {
 		clusterMode            ClusterMode
 		service                *model.Service
 		port                   *model.Port
+		proxy                  *model.Proxy
 		networkView            map[string]bool
 		destRule               *networking.DestinationRule
 		expectedSubsetClusters []*cluster.Cluster
@@ -83,6 +87,7 @@ func TestApplyDestinationRule(t *testing.T) {
 			clusterMode:            DefaultClusterMode,
 			service:                &model.Service{},
 			port:                   &model.Port{},
+			proxy:                  &model.Proxy{},
 			networkView:            map[string]bool{},
 			destRule:               nil,
 			expectedSubsetClusters: []*cluster.Cluster{},
@@ -93,9 +98,10 @@ func TestApplyDestinationRule(t *testing.T) {
 			clusterMode: DefaultClusterMode,
 			service:     service,
 			port:        servicePort[0],
+			proxy:       &model.Proxy{},
 			networkView: map[string]bool{},
 			destRule: &networking.DestinationRule{
-				Host: "foo.default.svc.cluster.local",
+				Host: "foo",
 				Subsets: []*networking.Subset{
 					{
 						Name:   "foobar",
@@ -105,10 +111,10 @@ func TestApplyDestinationRule(t *testing.T) {
 			},
 			expectedSubsetClusters: []*cluster.Cluster{
 				{
-					Name:                 "outbound|8080|foobar|foo.default.svc.cluster.local",
+					Name:                 "outbound|8080|foobar|foo",
 					ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS},
 					EdsClusterConfig: &cluster.Cluster_EdsClusterConfig{
-						ServiceName: "outbound|8080|foobar|foo.default.svc.cluster.local",
+						ServiceName: "outbound|8080|foobar|foo",
 					},
 				},
 			},
@@ -119,9 +125,10 @@ func TestApplyDestinationRule(t *testing.T) {
 			clusterMode: SniDnatClusterMode,
 			service:     service,
 			port:        servicePort[0],
+			proxy:       &model.Proxy{},
 			networkView: map[string]bool{},
 			destRule: &networking.DestinationRule{
-				Host: "foo.default.svc.cluster.local",
+				Host: "foo",
 				Subsets: []*networking.Subset{
 					{
 						Name:   "foobar",
@@ -131,10 +138,10 @@ func TestApplyDestinationRule(t *testing.T) {
 			},
 			expectedSubsetClusters: []*cluster.Cluster{
 				{
-					Name:                 "outbound_.8080_.foobar_.foo.default.svc.cluster.local",
+					Name:                 "outbound_.8080_.foobar_.foo",
 					ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS},
 					EdsClusterConfig: &cluster.Cluster_EdsClusterConfig{
-						ServiceName: "outbound_.8080_.foobar_.foo.default.svc.cluster.local",
+						ServiceName: "outbound_.8080_.foobar_.foo",
 					},
 				},
 			},
@@ -145,9 +152,10 @@ func TestApplyDestinationRule(t *testing.T) {
 			clusterMode: DefaultClusterMode,
 			service:     service,
 			port:        servicePort[0],
+			proxy:       &model.Proxy{},
 			networkView: map[string]bool{},
 			destRule: &networking.DestinationRule{
-				Host: "foo.default.svc.cluster.local",
+				Host: "foo",
 				Subsets: []*networking.Subset{
 					{
 						Name:   "foobar",
@@ -164,10 +172,10 @@ func TestApplyDestinationRule(t *testing.T) {
 			},
 			expectedSubsetClusters: []*cluster.Cluster{
 				{
-					Name:                 "outbound|8080|foobar|foo.default.svc.cluster.local",
+					Name:                 "outbound|8080|foobar|foo",
 					ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS},
 					EdsClusterConfig: &cluster.Cluster_EdsClusterConfig{
-						ServiceName: "outbound|8080|foobar|foo.default.svc.cluster.local",
+						ServiceName: "outbound|8080|foobar|foo",
 					},
 					CircuitBreakers: &cluster.CircuitBreakers{
 						Thresholds: []*cluster.CircuitBreakers_Thresholds{
@@ -181,30 +189,11 @@ func TestApplyDestinationRule(t *testing.T) {
 				},
 			},
 		},
-		{
-			name:        "destination rule with use client protocol traffic policy",
-			cluster:     &cluster.Cluster{Name: "foo", ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS}},
-			clusterMode: DefaultClusterMode,
-			service:     service,
-			port:        servicePort[0],
-			networkView: map[string]bool{},
-			destRule: &networking.DestinationRule{
-				Host: "foo.default.svc.cluster.local",
-				TrafficPolicy: &networking.TrafficPolicy{
-					ConnectionPool: &networking.ConnectionPoolSettings{
-						Http: &networking.ConnectionPoolSettings_HTTPSettings{
-							MaxRetries:        10,
-							UseClientProtocol: true,
-						},
-					},
-				},
-			},
-			expectedSubsetClusters: []*cluster.Cluster{},
-		},
 	}
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+
 			instances := []*model.ServiceInstance{
 				{
 					Service:     tt.service,
@@ -221,23 +210,25 @@ func TestApplyDestinationRule(t *testing.T) {
 				},
 			}
 
-			var cfg *config.Config
+			serviceDiscovery := memregistry.NewServiceDiscovery([]*model.Service{tt.service})
+			serviceDiscovery.WantGetProxyServiceInstances = instances
+
+			configStore := model.MakeIstioStore(memory.Make(collections.Pilot))
 			if tt.destRule != nil {
-				cfg = &config.Config{
-					Meta: config.Meta{
+				configStore.Create(model.Config{
+					ConfigMeta: model.ConfigMeta{
 						GroupVersionKind: gvk.DestinationRule,
 						Name:             "acme",
-						Namespace:        "default",
 					},
 					Spec: tt.destRule,
-				}
+				})
 			}
-			cg := NewConfigGenTest(t, TestOptions{
-				ConfigPointers: []*config.Config{cfg},
-				Services:       []*model.Service{tt.service},
-			})
-			cg.MemRegistry.WantGetProxyServiceInstances = instances
-			cb := NewClusterBuilder(cg.SetupProxy(nil), cg.PushContext())
+			env := newTestEnvironment(serviceDiscovery, testMesh, configStore)
+
+			proxy := getProxy()
+			proxy.SetSidecarScope(env.PushContext)
+
+			cb := NewClusterBuilder(tt.proxy, env.PushContext)
 
 			subsetClusters := cb.applyDestinationRule(tt.cluster, tt.clusterMode, tt.service, tt.port, tt.networkView)
 			if len(subsetClusters) != len(tt.expectedSubsetClusters) {
@@ -245,15 +236,6 @@ func TestApplyDestinationRule(t *testing.T) {
 			}
 			if len(tt.expectedSubsetClusters) > 0 {
 				compareClusters(t, tt.expectedSubsetClusters[0], subsetClusters[0])
-			}
-			// Validate that use client protocol configures cluster correctly.
-			if tt.destRule != nil && tt.destRule.TrafficPolicy != nil && tt.destRule.TrafficPolicy.GetConnectionPool().GetHttp().UseClientProtocol {
-				if tt.cluster.ProtocolSelection != cluster.Cluster_USE_DOWNSTREAM_PROTOCOL {
-					t.Errorf("Expected cluster to have USE_DOWNSTREAM_PROTOCOL but has %v", tt.cluster.ProtocolSelection)
-				}
-				if tt.cluster.Http2ProtocolOptions == nil {
-					t.Errorf("Expected cluster to have http2 protocol options but they are absent")
-				}
 			}
 		})
 	}
@@ -278,280 +260,12 @@ func compareClusters(t *testing.T, ec *cluster.Cluster, gc *cluster.Cluster) {
 	}
 }
 
-func TestMergeTrafficPolicy(t *testing.T) {
-	cases := []struct {
-		name     string
-		original *networking.TrafficPolicy
-		subset   *networking.TrafficPolicy
-		port     *model.Port
-		expected *networking.TrafficPolicy
-	}{
-		{
-			name:     "all nil policies",
-			original: nil,
-			subset:   nil,
-			port:     nil,
-			expected: nil,
-		},
-		{
-			name: "no subset policy",
-			original: &networking.TrafficPolicy{
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-			},
-			subset: nil,
-			port:   nil,
-			expected: &networking.TrafficPolicy{
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-			},
-		},
-		{
-			name:     "no parent policy",
-			original: nil,
-			subset: &networking.TrafficPolicy{
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-			},
-			port: nil,
-			expected: &networking.TrafficPolicy{
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-			},
-		},
-		{
-			name: "merge non-conflicting fields",
-			original: &networking.TrafficPolicy{
-				Tls: &networking.ClientTLSSettings{
-					Mode: networking.ClientTLSSettings_ISTIO_MUTUAL,
-				},
-			},
-			subset: &networking.TrafficPolicy{
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-			},
-			port: nil,
-			expected: &networking.TrafficPolicy{
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-				Tls: &networking.ClientTLSSettings{
-					Mode: networking.ClientTLSSettings_ISTIO_MUTUAL,
-				},
-			},
-		},
-		{
-			name: "subset overwrite top-level fields",
-			original: &networking.TrafficPolicy{
-				Tls: &networking.ClientTLSSettings{
-					Mode: networking.ClientTLSSettings_ISTIO_MUTUAL,
-				},
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-			},
-			subset: &networking.TrafficPolicy{
-				Tls: &networking.ClientTLSSettings{
-					Mode: networking.ClientTLSSettings_SIMPLE,
-				},
-			},
-			port: nil,
-			expected: &networking.TrafficPolicy{
-				Tls: &networking.ClientTLSSettings{
-					Mode: networking.ClientTLSSettings_SIMPLE,
-				},
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-			},
-		},
-		{
-			name:     "merge port level policy, and do not inherit top-level fields",
-			original: nil,
-			subset: &networking.TrafficPolicy{
-				LoadBalancer: &networking.LoadBalancerSettings{
-					LbPolicy: &networking.LoadBalancerSettings_Simple{
-						Simple: networking.LoadBalancerSettings_ROUND_ROBIN,
-					},
-				},
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-				PortLevelSettings: []*networking.TrafficPolicy_PortTrafficPolicy{
-					{
-						Port: &networking.PortSelector{
-							Number: 8080,
-						},
-						LoadBalancer: &networking.LoadBalancerSettings{
-							LbPolicy: &networking.LoadBalancerSettings_Simple{
-								Simple: networking.LoadBalancerSettings_LEAST_CONN,
-							},
-						},
-					},
-				},
-			},
-			port: &model.Port{Port: 8080},
-			expected: &networking.TrafficPolicy{
-				LoadBalancer: &networking.LoadBalancerSettings{
-					LbPolicy: &networking.LoadBalancerSettings_Simple{
-						Simple: networking.LoadBalancerSettings_LEAST_CONN,
-					},
-				},
-			},
-		},
-		{
-			name: "merge port level policy, and do not inherit top-level fields",
-			original: &networking.TrafficPolicy{
-				LoadBalancer: &networking.LoadBalancerSettings{
-					LbPolicy: &networking.LoadBalancerSettings_Simple{
-						Simple: networking.LoadBalancerSettings_ROUND_ROBIN,
-					},
-				},
-				OutlierDetection: &networking.OutlierDetection{
-					ConsecutiveErrors: 20,
-				},
-				PortLevelSettings: []*networking.TrafficPolicy_PortTrafficPolicy{
-					{
-						Port: &networking.PortSelector{
-							Number: 8080,
-						},
-						OutlierDetection: &networking.OutlierDetection{
-							ConsecutiveErrors: 15,
-						},
-					},
-				},
-			},
-			subset: &networking.TrafficPolicy{
-				LoadBalancer: &networking.LoadBalancerSettings{
-					LbPolicy: &networking.LoadBalancerSettings_Simple{
-						Simple: networking.LoadBalancerSettings_ROUND_ROBIN,
-					},
-				},
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-				PortLevelSettings: []*networking.TrafficPolicy_PortTrafficPolicy{
-					{
-						Port: &networking.PortSelector{
-							Number: 8080,
-						},
-						OutlierDetection: &networking.OutlierDetection{
-							ConsecutiveErrors: 13,
-						},
-					},
-				},
-			},
-			port: &model.Port{Port: 8080},
-			expected: &networking.TrafficPolicy{
-				OutlierDetection: &networking.OutlierDetection{
-					ConsecutiveErrors: 13,
-				},
-			},
-		},
-		{
-			name: "default cluster, non-matching port selector",
-			original: &networking.TrafficPolicy{
-				LoadBalancer: &networking.LoadBalancerSettings{
-					LbPolicy: &networking.LoadBalancerSettings_Simple{
-						Simple: networking.LoadBalancerSettings_ROUND_ROBIN,
-					},
-				},
-				OutlierDetection: &networking.OutlierDetection{
-					ConsecutiveErrors: 20,
-				},
-				PortLevelSettings: []*networking.TrafficPolicy_PortTrafficPolicy{
-					{
-						Port: &networking.PortSelector{
-							Number: 8080,
-						},
-						OutlierDetection: &networking.OutlierDetection{
-							ConsecutiveErrors: 15,
-						},
-					},
-				},
-			},
-			subset: &networking.TrafficPolicy{
-				LoadBalancer: &networking.LoadBalancerSettings{
-					LbPolicy: &networking.LoadBalancerSettings_Simple{
-						Simple: networking.LoadBalancerSettings_ROUND_ROBIN,
-					},
-				},
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-				PortLevelSettings: []*networking.TrafficPolicy_PortTrafficPolicy{
-					{
-						Port: &networking.PortSelector{
-							Number: 8080,
-						},
-						OutlierDetection: &networking.OutlierDetection{
-							ConsecutiveErrors: 13,
-						},
-					},
-				},
-			},
-			port: &model.Port{Port: 9090},
-			expected: &networking.TrafficPolicy{
-				LoadBalancer: &networking.LoadBalancerSettings{
-					LbPolicy: &networking.LoadBalancerSettings_Simple{
-						Simple: networking.LoadBalancerSettings_ROUND_ROBIN,
-					},
-				},
-				ConnectionPool: &networking.ConnectionPoolSettings{
-					Http: &networking.ConnectionPoolSettings_HTTPSettings{
-						MaxRetries: 10,
-					},
-				},
-				OutlierDetection: &networking.OutlierDetection{
-					ConsecutiveErrors: 20,
-				},
-			},
-		},
-	}
-
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			policy := MergeTrafficPolicy(tt.original, tt.subset, tt.port)
-			if !reflect.DeepEqual(policy, tt.expected) {
-				t.Errorf("Unexpected merged TrafficPolicy. want %v, got %v", tt.expected, policy)
-			}
-		})
-	}
-
-}
-
 func TestApplyEdsConfig(t *testing.T) {
 	cases := []struct {
-		name      string
-		cluster   *cluster.Cluster
-		edsConfig *cluster.Cluster_EdsClusterConfig
+		name       string
+		cluster    *cluster.Cluster
+		cdsVersion string
+		edsConfig  *cluster.Cluster_EdsClusterConfig
 	}{
 		{
 			name:      "non eds type of cluster",
@@ -568,15 +282,29 @@ func TestApplyEdsConfig(t *testing.T) {
 						Ads: &core.AggregatedConfigSource{},
 					},
 					InitialFetchTimeout: features.InitialFetchTimeout,
+				},
+			},
+		},
+		{
+			name:    "eds type of cluster v3",
+			cluster: &cluster.Cluster{Name: "foo", ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS}},
+			edsConfig: &cluster.Cluster_EdsClusterConfig{
+				ServiceName: "foo",
+				EdsConfig: &core.ConfigSource{
+					ConfigSourceSpecifier: &core.ConfigSource_Ads{
+						Ads: &core.AggregatedConfigSource{},
+					},
+					InitialFetchTimeout: features.InitialFetchTimeout,
 					ResourceApiVersion:  core.ApiVersion_V3,
 				},
 			},
+			cdsVersion: v3.ClusterType,
 		},
 	}
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			maybeApplyEdsConfig(tt.cluster)
+			maybeApplyEdsConfig(tt.cluster, tt.cdsVersion)
 			if !reflect.DeepEqual(tt.cluster.EdsClusterConfig, tt.edsConfig) {
 				t.Errorf("Unexpected Eds config in cluster. want %v, got %v", tt.edsConfig, tt.cluster.EdsClusterConfig)
 			}
@@ -613,37 +341,6 @@ func TestBuildDefaultCluster(t *testing.T) {
 				ConnectTimeout:       &duration.Duration{Seconds: 10, Nanos: 1},
 				CircuitBreakers: &cluster.CircuitBreakers{
 					Thresholds: []*cluster.CircuitBreakers_Thresholds{&defaultCircuitBreakerThresholds},
-				},
-				Metadata: &core.Metadata{
-					FilterMetadata: map[string]*structpb.Struct{
-						util.IstioMetadataKey: {
-							Fields: map[string]*structpb.Value{
-								"services": {Kind: &structpb.Value_ListValue{ListValue: &structpb.ListValue{Values: []*structpb.Value{
-									{Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
-										"host": {
-											Kind: &structpb.Value_StringValue{
-												StringValue: "host",
-											},
-										},
-										"name": {
-											Kind: &structpb.Value_StringValue{
-												StringValue: "svc",
-											},
-										},
-										"namespace": {
-											Kind: &structpb.Value_StringValue{
-												StringValue: "default",
-											},
-										},
-									}}}},
-								}}}},
-								"default_original_port": {
-									Kind: &structpb.Value_NumberValue{
-										NumberValue: float64(8080),
-									},
-								},
-							}},
-					},
 				},
 			},
 		},
@@ -709,52 +406,26 @@ func TestBuildDefaultCluster(t *testing.T) {
 				CircuitBreakers: &cluster.CircuitBreakers{
 					Thresholds: []*cluster.CircuitBreakers_Thresholds{&defaultCircuitBreakerThresholds},
 				},
-				Metadata: &core.Metadata{
-					FilterMetadata: map[string]*structpb.Struct{
-						util.IstioMetadataKey: {Fields: map[string]*structpb.Value{
-							"services": {Kind: &structpb.Value_ListValue{ListValue: &structpb.ListValue{Values: []*structpb.Value{
-								{Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
-									"host": {
-										Kind: &structpb.Value_StringValue{
-											StringValue: "host",
-										},
-									},
-									"name": {
-										Kind: &structpb.Value_StringValue{
-											StringValue: "svc",
-										},
-									},
-									"namespace": {
-										Kind: &structpb.Value_StringValue{
-											StringValue: "default",
-										},
-									},
-								}}}},
-							}}}},
-							"default_original_port": {
-								Kind: &structpb.Value_NumberValue{
-									NumberValue: float64(8080),
-								},
-							},
-						}},
-					},
-				},
 			},
 		},
 	}
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			cg := NewConfigGenTest(t, TestOptions{MeshConfig: &testMesh})
-			cb := NewClusterBuilder(cg.SetupProxy(nil), cg.PushContext())
+			serviceDiscovery := memregistry.NewServiceDiscovery(nil)
+			configStore := model.MakeIstioStore(memory.Make(collections.Pilot))
+			env := newTestEnvironment(serviceDiscovery, testMesh, configStore)
 
-			defaultCluster := cb.buildDefaultCluster(tt.clusterName, tt.discovery, tt.endpoints, tt.direction, servicePort, &model.Service{Ports: model.PortList{
-				servicePort,
-			},
-				Hostname: "host", MeshExternal: false, Attributes: model.ServiceAttributes{Name: "svc", Namespace: "default"}}, nil)
+			proxy := getProxy()
+			proxy.SetSidecarScope(env.PushContext)
 
-			if diff := cmp.Diff(defaultCluster, tt.expectedCluster, protocmp.Transform()); diff != "" {
-				t.Errorf("Unexpected default cluster, diff: %v", diff)
+			cb := NewClusterBuilder(&model.Proxy{}, env.PushContext)
+
+			defaultCluster := cb.buildDefaultCluster(tt.clusterName, tt.discovery,
+				tt.endpoints, tt.direction, servicePort, tt.external)
+
+			if !reflect.DeepEqual(defaultCluster, tt.expectedCluster) {
+				t.Errorf("Unexpected default cluster, want %v got %v", tt.expectedCluster, defaultCluster)
 			}
 		})
 	}
@@ -797,13 +468,15 @@ func TestBuildLocalityLbEndpoints(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		mesh      meshconfig.MeshConfig
+		newEnv    func(model.ServiceDiscovery, model.IstioConfigStore) *model.Environment
 		instances []*model.ServiceInstance
 		expected  []*endpoint.LocalityLbEndpoints
 	}{
 		{
 			name: "basics",
-			mesh: testMesh,
+			newEnv: func(sd model.ServiceDiscovery, cs model.IstioConfigStore) *model.Environment {
+				return newTestEnvironment(sd, testMesh, cs)
+			},
 			instances: []*model.ServiceInstance{
 				{
 					Service:     service,
@@ -951,7 +624,9 @@ func TestBuildLocalityLbEndpoints(t *testing.T) {
 		},
 		{
 			name: "cluster local",
-			mesh: withClusterLocalHosts(testMesh, "*.example.org"),
+			newEnv: func(sd model.ServiceDiscovery, cs model.IstioConfigStore) *model.Environment {
+				return newTestEnvironment(sd, withClusterLocalHosts(testMesh, "*.example.org"), cs)
+			},
 			instances: []*model.ServiceInstance{
 				{
 					Service:     service,
@@ -1029,15 +704,17 @@ func TestBuildLocalityLbEndpoints(t *testing.T) {
 		})
 	}
 
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			cg := NewConfigGenTest(t, TestOptions{
-				MeshConfig: &tt.mesh,
-				Services:   []*model.Service{service},
-				Instances:  tt.instances,
-			})
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			configStore := model.MakeIstioStore(memory.Make(collections.Pilot))
+			serviceDiscovery := memregistry.NewServiceDiscovery([]*model.Service{service})
+			serviceDiscovery.WantGetProxyServiceInstances = c.instances
+			for _, i := range c.instances {
+				serviceDiscovery.AddInstance(i.Service.Hostname, i)
+			}
 
-			cb := NewClusterBuilder(cg.SetupProxy(proxy), cg.PushContext())
+			env := c.newEnv(serviceDiscovery, configStore)
+			cb := NewClusterBuilder(proxy, env.PushContext)
 			nv := map[string]bool{
 				"nw-0":               true,
 				"nw-1":               true,
@@ -1045,7 +722,7 @@ func TestBuildLocalityLbEndpoints(t *testing.T) {
 			}
 			actual := cb.buildLocalityLbEndpoints(nv, service, 8080, nil)
 			sortEndpoints(actual)
-			if v := cmp.Diff(tt.expected, actual, protocmp.Transform()); v != "" {
+			if v := cmp.Diff(c.expected, actual, protocmp.Transform()); v != "" {
 				t.Fatalf("Expected (-) != actual (+):\n%s", v)
 			}
 		})
@@ -1080,12 +757,17 @@ func TestBuildPassthroughClusters(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			serviceDiscovery := memregistry.NewServiceDiscovery(nil)
+			configStore := model.MakeIstioStore(memory.Make(collections.Pilot))
+			env := newTestEnvironment(serviceDiscovery, testMesh, configStore)
+
 			proxy := &model.Proxy{IPAddresses: tt.ips}
-			cg := NewConfigGenTest(t, TestOptions{})
+			proxy.SetSidecarScope(env.PushContext)
+			proxy.DiscoverIPVersions()
 
-			cb := NewClusterBuilder(cg.SetupProxy(proxy), cg.PushContext())
+			cb := NewClusterBuilder(proxy, env.PushContext)
+
 			clusters := cb.buildInboundPassthroughClusters()
-
 			var hasIpv4, hasIpv6 bool
 			for _, c := range clusters {
 				hasIpv4 = hasIpv4 || c.Name == util.InboundPassthroughClusterIpv4
@@ -1097,14 +779,9 @@ func TestBuildPassthroughClusters(t *testing.T) {
 			if hasIpv6 != tt.ipv6Expected {
 				t.Errorf("Unexpected Ipv6 Passthrough Cluster, want %v got %v", tt.ipv6Expected, hasIpv6)
 			}
-
-			passthrough := xdstest.ExtractCluster(util.InboundPassthroughClusterIpv4, clusters)
-			if passthrough == nil {
-				passthrough = xdstest.ExtractCluster(util.InboundPassthroughClusterIpv6, clusters)
-			}
 			// Validate that Passthrough Cluster LB Policy is set correctly.
-			if passthrough.GetType() != cluster.Cluster_ORIGINAL_DST || passthrough.GetLbPolicy() != cluster.Cluster_CLUSTER_PROVIDED {
-				t.Errorf("Unexpected Discovery type or Lb policy, got Discovery type: %v, Lb Policy: %v", passthrough.GetType(), passthrough.GetLbPolicy())
+			if clusters[0].GetType() != cluster.Cluster_ORIGINAL_DST || clusters[0].GetLbPolicy() != cluster.Cluster_CLUSTER_PROVIDED {
+				t.Errorf("Unexpected Discovery type or Lb policy, got Discovery type: %v, Lb Policy: %v", clusters[0].GetType(), clusters[0].GetLbPolicy())
 			}
 		})
 	}

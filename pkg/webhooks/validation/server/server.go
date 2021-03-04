@@ -30,10 +30,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 
+	"istio.io/istio/mixer/pkg/config/store"
 	"istio.io/istio/pilot/pkg/config/kube/crd"
 	"istio.io/istio/pkg/config/schema/collection"
+	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/resource"
-	"istio.io/istio/pkg/config/validation"
 	"istio.io/istio/pkg/kube"
 	"istio.io/pkg/log"
 )
@@ -64,7 +65,10 @@ func init() {
 // Options contains the configuration for the Istio Pilot validation
 // admission controller.
 type Options struct {
-	// Schemas provides a description of all configuration resources.
+	// MixerValidator implements the backend validator functions for mixer configuration.
+	MixerValidator store.BackendValidator
+
+	// Schemas provides a description of all configuration resources excluding mixer types.
 	Schemas collection.Schemas
 
 	// DomainSuffix is the DNS domain suffix for Pilot CRD resources,
@@ -102,6 +106,9 @@ type Webhook struct {
 	// pilot
 	schemas      collection.Schemas
 	domainSuffix string
+
+	// mixer
+	validator store.BackendValidator
 }
 
 // New creates a new instance of the admission webhook server.
@@ -111,12 +118,14 @@ func New(p Options) (*Webhook, error) {
 		return nil, errors.New("expected mux to be passed, but was not passed")
 	}
 	wh := &Webhook{
-		schemas: p.Schemas,
+		schemas:   p.Schemas,
+		validator: p.MixerValidator,
 	}
 
 	p.Mux.HandleFunc("/validate", wh.serveValidate)
 	// old handlers retained backwards compatibility during upgrades
 	p.Mux.HandleFunc("/admitpilot", wh.serveAdmitPilot)
+	p.Mux.HandleFunc("/admitmixer", wh.serveAdmitMixer)
 
 	return wh, nil
 }
@@ -210,12 +219,23 @@ func (wh *Webhook) serveAdmitPilot(w http.ResponseWriter, r *http.Request) {
 	serve(w, r, wh.admitPilot)
 }
 
+func (wh *Webhook) serveAdmitMixer(w http.ResponseWriter, r *http.Request) {
+	serve(w, r, wh.admitMixer)
+}
+
 func (wh *Webhook) serveValidate(w http.ResponseWriter, r *http.Request) {
 	serve(w, r, wh.validate)
 }
 
 func (wh *Webhook) validate(request *kube.AdmissionRequest) *kube.AdmissionResponse {
 	switch request.Kind.Kind {
+	case collections.IstioPolicyV1Beta1Rules.Resource().Kind(),
+		collections.IstioPolicyV1Beta1Attributemanifests.Resource().Kind(),
+		collections.IstioConfigV1Alpha2Adapters.Resource().Kind(),
+		collections.IstioPolicyV1Beta1Handlers.Resource().Kind(),
+		collections.IstioPolicyV1Beta1Instances.Resource().Kind(),
+		collections.IstioConfigV1Alpha2Templates.Resource().Kind():
+		return wh.admitMixer(request)
 	default:
 		return wh.admitPilot(request)
 	}
@@ -258,8 +278,7 @@ func (wh *Webhook) admitPilot(request *kube.AdmissionRequest) *kube.AdmissionRes
 		return toAdmissionResponse(fmt.Errorf("error decoding configuration: %v", err))
 	}
 
-	warnings, err := s.Resource().ValidateConfig(*out)
-	if err != nil {
+	if err := s.Resource().ValidateProto(out.Name, out.Namespace, out.Spec); err != nil {
 		scope.Infof("configuration is invalid: %v", err)
 		reportValidationFailed(request, reasonInvalidConfig)
 		return toAdmissionResponse(fmt.Errorf("configuration is invalid: %v", err))
@@ -271,22 +290,65 @@ func (wh *Webhook) admitPilot(request *kube.AdmissionRequest) *kube.AdmissionRes
 	}
 
 	reportValidationPass(request)
-	return &kube.AdmissionResponse{Allowed: true, Warnings: toKubeWarnings(warnings)}
+	return &kube.AdmissionResponse{Allowed: true}
 }
 
-func toKubeWarnings(warn validation.Warning) []string {
-	if warn == nil {
-		return nil
+func (wh *Webhook) admitMixer(request *kube.AdmissionRequest) *kube.AdmissionResponse {
+	ev := &store.BackendEvent{
+		Key: store.Key{
+			Namespace: request.Namespace,
+			Kind:      request.Kind.Kind,
+		},
 	}
-	me, ok := warn.(*multierror.Error)
-	if ok {
-		res := []string{}
-		for _, e := range me.Errors {
-			res = append(res, e.Error())
+	switch request.Operation {
+	case kube.Create, kube.Update:
+		ev.Type = store.Update
+		var obj crd.IstioKind
+		if err := json.Unmarshal(request.Object.Raw, &obj); err != nil {
+			reportValidationFailed(request, reasonYamlDecodeError)
+			return toAdmissionResponse(fmt.Errorf("cannot decode configuration: %v", err))
 		}
-		return res
+
+		ev.Value = &store.BackEndResource{
+			Metadata: store.ResourceMeta{
+				Name:        obj.Name,
+				Namespace:   obj.Namespace,
+				Labels:      obj.Labels,
+				Annotations: obj.Annotations,
+				Revision:    obj.ResourceVersion,
+			},
+			Spec: obj.Spec,
+		}
+		ev.Key.Name = ev.Value.Metadata.Name
+
+		if reason, err := checkFields(request.Object.Raw, request.Kind.Kind, request.Namespace, ev.Key.Name); err != nil {
+			reportValidationFailed(request, reason)
+			return toAdmissionResponse(err)
+		}
+
+	case kube.Delete:
+		if request.Name == "" {
+			reportValidationFailed(request, reasonUnknownType)
+			return toAdmissionResponse(fmt.Errorf("illformed request: name not found on delete request"))
+		}
+		ev.Type = store.Delete
+		ev.Key.Name = request.Name
+	default:
+		scope.Warnf("Unsupported webhook operation %v", request.Operation)
+		reportValidationFailed(request, reasonUnsupportedOperation)
+		return &kube.AdmissionResponse{Allowed: true}
 	}
-	return []string{warn.Error()}
+
+	// webhook skips deletions
+	if ev.Type == store.Update {
+		if err := wh.validator.Validate(ev); err != nil {
+			reportValidationFailed(request, reasonInvalidConfig)
+			return toAdmissionResponse(err)
+		}
+	}
+
+	reportValidationPass(request)
+	return &kube.AdmissionResponse{Allowed: true}
 }
 
 func checkFields(raw []byte, kind string, namespace string, name string) (string, error) {

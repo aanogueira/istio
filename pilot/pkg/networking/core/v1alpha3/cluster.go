@@ -31,23 +31,30 @@ import (
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/pkg/log"
+
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/envoyfilter"
 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/loadbalancer"
+	"istio.io/istio/pilot/pkg/networking/plugin"
 	"istio.io/istio/pilot/pkg/networking/util"
 	authn_model "istio.io/istio/pilot/pkg/security/model"
 	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pilot/pkg/util/sets"
+	xdsv2 "istio.io/istio/pilot/pkg/xds/v2"
+	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/util/gogo"
-	"istio.io/pkg/log"
 )
 
 const (
 	// DefaultLbType set to round robin
 	DefaultLbType = networking.LoadBalancerSettings_ROUND_ROBIN
+
+	// ManagementClusterHostname indicates the hostname used for building inbound clusters for management ports
+	ManagementClusterHostname = "mgmtCluster"
 )
 
 var (
@@ -97,34 +104,32 @@ func getDefaultCircuitBreakerThresholds() *cluster.CircuitBreakers_Thresholds {
 // For inbound (sidecar only): Cluster for each inbound endpoint port and for each service port
 func (configgen *ConfigGeneratorImpl) BuildClusters(proxy *model.Proxy, push *model.PushContext) []*cluster.Cluster {
 	clusters := make([]*cluster.Cluster, 0)
-	envoyFilterPatches := push.EnvoyFilters(proxy)
 	cb := NewClusterBuilder(proxy, push)
 	instances := proxy.ServiceInstances
 
+	outboundClusters := configgen.buildOutboundClusters(cb)
+
 	switch proxy.Type {
 	case model.SidecarProxy:
-		// Setup outbound clusters
-		outboundPatcher := clusterPatcher{envoyFilterPatches, networking.EnvoyFilter_SIDECAR_OUTBOUND}
-		clusters = append(clusters, configgen.buildOutboundClusters(cb, outboundPatcher)...)
 		// Add a blackhole and passthrough cluster for catching traffic to unresolved routes
-		clusters = outboundPatcher.conditionallyAppend(clusters, cb.buildBlackHoleCluster(), cb.buildDefaultPassthroughCluster())
-		clusters = append(clusters, outboundPatcher.insertedClusters()...)
-
-		// Setup inbound clusters
-		inboundPatcher := clusterPatcher{envoyFilterPatches, networking.EnvoyFilter_SIDECAR_INBOUND}
+		// DO NOT CALL PLUGINS for these two clusters.
+		outboundClusters = append(outboundClusters, cb.buildBlackHoleCluster(), cb.buildDefaultPassthroughCluster())
+		outboundClusters = envoyfilter.ApplyClusterPatches(networking.EnvoyFilter_SIDECAR_OUTBOUND, proxy, push, outboundClusters)
+		inboundClusters := configgen.buildInboundClusters(cb, instances)
 		// Pass through clusters for inbound traffic. These cluster bind loopback-ish src address to access node local service.
-		clusters = append(clusters, configgen.buildInboundClusters(cb, instances, inboundPatcher)...)
-		clusters = inboundPatcher.conditionallyAppend(clusters, cb.buildInboundPassthroughClusters()...)
-		clusters = append(clusters, inboundPatcher.insertedClusters()...)
+		inboundClusters = append(inboundClusters, cb.buildInboundPassthroughClusters()...)
+		inboundClusters = envoyfilter.ApplyClusterPatches(networking.EnvoyFilter_SIDECAR_INBOUND, proxy, push, inboundClusters)
+		clusters = append(clusters, outboundClusters...)
+		clusters = append(clusters, inboundClusters...)
+
 	default: // Gateways
-		patcher := clusterPatcher{envoyFilterPatches, networking.EnvoyFilter_GATEWAY}
-		clusters = append(clusters, configgen.buildOutboundClusters(cb, patcher)...)
 		// Gateways do not require the default passthrough cluster as they do not have original dst listeners.
-		clusters = patcher.conditionallyAppend(clusters, cb.buildBlackHoleCluster())
+		outboundClusters = append(outboundClusters, cb.buildBlackHoleCluster())
 		if proxy.Type == model.Router && proxy.GetRouterMode() == model.SniDnatRouter {
-			clusters = append(clusters, configgen.buildOutboundSniDnatClusters(proxy, push, patcher)...)
+			outboundClusters = append(outboundClusters, configgen.buildOutboundSniDnatClusters(proxy, push)...)
 		}
-		clusters = append(clusters, patcher.insertedClusters()...)
+		outboundClusters = envoyfilter.ApplyClusterPatches(networking.EnvoyFilter_GATEWAY, proxy, push, outboundClusters)
+		clusters = outboundClusters
 	}
 
 	clusters = normalizeClusters(push, proxy, clusters)
@@ -141,7 +146,7 @@ func normalizeClusters(metrics model.Metrics, proxy *model.Proxy, clusters []*cl
 		if !have.Contains(cluster.Name) {
 			out = append(out, cluster)
 		} else {
-			metrics.AddMetric(model.DuplicatedClusters, cluster.Name, proxy.ID,
+			metrics.AddMetric(model.DuplicatedClusters, cluster.Name, proxy,
 				fmt.Sprintf("Duplicate cluster %s found while pushing CDS", cluster.Name))
 		}
 		have.Insert(cluster.Name)
@@ -149,8 +154,12 @@ func normalizeClusters(metrics model.Metrics, proxy *model.Proxy, clusters []*cl
 	return out
 }
 
-func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, cp clusterPatcher) []*cluster.Cluster {
+func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder) []*cluster.Cluster {
 	clusters := make([]*cluster.Cluster, 0)
+	inputParams := &plugin.InputParams{
+		Push: cb.push,
+		Node: cb.proxy,
+	}
 	networkView := model.GetNetworkView(cb.proxy)
 
 	var services []*model.Service
@@ -164,12 +173,15 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, 
 			if port.Protocol == protocol.UDP {
 				continue
 			}
+			inputParams.Service = service
+			inputParams.Port = port
+
 			lbEndpoints := cb.buildLocalityLbEndpoints(networkView, service, port.Port, nil)
 
 			// create default cluster
 			discoveryType := convertResolution(cb.proxy, service)
 			clusterName := model.BuildSubsetKey(model.TrafficDirectionOutbound, "", service.Hostname, port.Port)
-			defaultCluster := cb.buildDefaultCluster(clusterName, discoveryType, lbEndpoints, model.TrafficDirectionOutbound, port, service, nil)
+			defaultCluster := cb.buildDefaultCluster(clusterName, discoveryType, lbEndpoints, model.TrafficDirectionOutbound, port, service.MeshExternal)
 			if defaultCluster == nil {
 				continue
 			}
@@ -179,41 +191,30 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, 
 			}
 
 			setUpstreamProtocol(cb.proxy, defaultCluster, port, model.TrafficDirectionOutbound)
-
+			clusters = append(clusters, defaultCluster)
 			subsetClusters := cb.applyDestinationRule(defaultCluster, DefaultClusterMode, service, port, networkView)
 
-			clusters = cp.conditionallyAppend(clusters, defaultCluster)
-			clusters = cp.conditionallyAppend(clusters, subsetClusters...)
+			// call plugins for subset clusters.
+			for _, subsetCluster := range subsetClusters {
+				for _, p := range configgen.Plugins {
+					p.OnOutboundCluster(inputParams, subsetCluster)
+				}
+			}
+			clusters = append(clusters, subsetClusters...)
+
+			// call plugins for the default cluster.
+			for _, p := range configgen.Plugins {
+				p.OnOutboundCluster(inputParams, defaultCluster)
+			}
 		}
 	}
 
 	return clusters
 }
 
-var NilClusterPatcher = clusterPatcher{}
-
-type clusterPatcher struct {
-	efw  *model.EnvoyFilterWrapper
-	pctx networking.EnvoyFilter_PatchContext
-}
-
-func (p clusterPatcher) conditionallyAppend(l []*cluster.Cluster, clusters ...*cluster.Cluster) []*cluster.Cluster {
-	for _, c := range clusters {
-		if envoyfilter.ShouldKeepCluster(p.pctx, p.efw, c) {
-			l = append(l, envoyfilter.ApplyClusterMerge(p.pctx, p.efw, c))
-		}
-	}
-	return l
-}
-
-func (p clusterPatcher) insertedClusters() []*cluster.Cluster {
-	return envoyfilter.InsertedClusters(p.pctx, p.efw)
-}
-
 // SniDnat clusters do not have any TLS setting, as they simply forward traffic to upstream
 // All SniDnat clusters are internal services in the mesh.
-func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.Proxy, push *model.PushContext,
-	cp clusterPatcher) []*cluster.Cluster {
+func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.Proxy, push *model.PushContext) []*cluster.Cluster {
 	clusters := make([]*cluster.Cluster, 0)
 	cb := NewClusterBuilder(proxy, push)
 
@@ -233,13 +234,12 @@ func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.
 			discoveryType := convertResolution(proxy, service)
 
 			clusterName := model.BuildDNSSrvSubsetKey(model.TrafficDirectionOutbound, "", service.Hostname, port.Port)
-			defaultCluster := cb.buildDefaultCluster(clusterName, discoveryType, lbEndpoints, model.TrafficDirectionOutbound, port, service, nil)
+			defaultCluster := cb.buildDefaultCluster(clusterName, discoveryType, lbEndpoints, model.TrafficDirectionOutbound, nil, service.MeshExternal)
 			if defaultCluster == nil {
 				continue
 			}
-			subsetClusters := cb.applyDestinationRule(defaultCluster, SniDnatClusterMode, service, port, networkView)
-			clusters = cp.conditionallyAppend(clusters, defaultCluster)
-			clusters = cp.conditionallyAppend(clusters, subsetClusters...)
+			clusters = append(clusters, defaultCluster)
+			clusters = append(clusters, cb.applyDestinationRule(defaultCluster, SniDnatClusterMode, service, port, networkView)...)
 		}
 	}
 
@@ -262,12 +262,7 @@ func buildInboundLocalityLbEndpoints(bind string, port uint32) []*endpoint.Local
 	}
 }
 
-type ClusterInstances struct {
-	PrimaryInstance *model.ServiceInstance
-	AllInstances    []*model.ServiceInstance
-}
-
-func (configgen *ConfigGeneratorImpl) buildInboundClusters(cb *ClusterBuilder, instances []*model.ServiceInstance, cp clusterPatcher) []*cluster.Cluster {
+func (configgen *ConfigGeneratorImpl) buildInboundClusters(cb *ClusterBuilder, instances []*model.ServiceInstance) []*cluster.Cluster {
 
 	clusters := make([]*cluster.Cluster, 0)
 
@@ -291,26 +286,22 @@ func (configgen *ConfigGeneratorImpl) buildInboundClusters(cb *ClusterBuilder, i
 			return nil
 		}
 
-		clustersToBuild := make(map[int][]*model.ServiceInstance)
+		have := make(map[*model.Port]bool)
 		for _, instance := range instances {
 			// Filter out service instances with the same port as we are going to mark them as duplicates any way
 			// in normalizeClusters method.
-			// However, we still need to capture all the instances on this port, as its required to populate telemetry metadata
-			// The first instance will be used as the "primary" instance; this means if we have an conflicts between
-			// Services the first one wins
-			ep := instance.ServicePort.Port
-			if util.IsIstioVersionGE181(cb.proxy) {
-				// Istio 1.8.1+ switched to keying on EndpointPort. We need both logics in place to support smooth upgrade from 1.8.0 to 1.8.x
-				ep = int(instance.Endpoint.EndpointPort)
+			if !have[instance.ServicePort] {
+				pluginParams := &plugin.InputParams{
+					Node:            cb.proxy,
+					ServiceInstance: instance,
+					Port:            instance.ServicePort,
+					Push:            cb.push,
+					Bind:            actualLocalHost,
+				}
+				localCluster := configgen.buildInboundClusterForPortOrUDS(pluginParams)
+				clusters = append(clusters, localCluster)
+				have[instance.ServicePort] = true
 			}
-			clustersToBuild[ep] = append(clustersToBuild[ep], instance)
-		}
-
-		// For each workload port, we will construct a cluster
-		for _, instances := range clustersToBuild {
-			instance := instances[0]
-			localCluster := cb.buildInboundClusterForPortOrUDS(cb.proxy, int(instance.Endpoint.EndpointPort), actualLocalHost, instance, instances)
-			clusters = cp.conditionallyAppend(clusters, localCluster)
 		}
 	} else {
 		rule := sidecarScope.Config.Spec.(*networking.Sidecar)
@@ -352,8 +343,15 @@ func (configgen *ConfigGeneratorImpl) buildInboundClusters(cb *ClusterBuilder, i
 			instance.Endpoint.ServicePortName = listenPort.Name
 			instance.Endpoint.EndpointPort = uint32(port)
 
-			localCluster := cb.buildInboundClusterForPortOrUDS(nil, int(ingressListener.Port.Number), endpointAddress, instance, nil)
-			clusters = cp.conditionallyAppend(clusters, localCluster)
+			pluginParams := &plugin.InputParams{
+				Node:            cb.proxy,
+				ServiceInstance: instance,
+				Port:            listenPort,
+				Push:            cb.push,
+				Bind:            endpointAddress,
+			}
+			localCluster := configgen.buildInboundClusterForPortOrUDS(pluginParams)
+			clusters = append(clusters, localCluster)
 		}
 	}
 
@@ -380,10 +378,46 @@ func (configgen *ConfigGeneratorImpl) findOrCreateServiceInstance(instances []*m
 			Hostname:   host.Name(sidecar + "." + sidecarns),
 			Attributes: attrs,
 		},
-		Endpoint: &model.IstioEndpoint{
-			EndpointPort: ingressListener.Port.Number,
-		},
+		Endpoint: &model.IstioEndpoint{},
 	}
+}
+
+func (configgen *ConfigGeneratorImpl) buildInboundClusterForPortOrUDS(pluginParams *plugin.InputParams) *cluster.Cluster {
+	cb := NewClusterBuilder(pluginParams.Node, pluginParams.Push)
+	instance := pluginParams.ServiceInstance
+	clusterName := model.BuildSubsetKey(model.TrafficDirectionInbound, instance.ServicePort.Name,
+		instance.Service.Hostname, instance.ServicePort.Port)
+	localityLbEndpoints := buildInboundLocalityLbEndpoints(pluginParams.Bind, instance.Endpoint.EndpointPort)
+	localCluster := cb.buildDefaultCluster(clusterName, cluster.Cluster_STATIC, localityLbEndpoints,
+		model.TrafficDirectionInbound, nil, false)
+	// If stat name is configured, build the alt statname.
+	if len(pluginParams.Push.Mesh.InboundClusterStatName) != 0 {
+		localCluster.AltStatName = util.BuildStatPrefix(pluginParams.Push.Mesh.InboundClusterStatName,
+			string(instance.Service.Hostname), "", instance.ServicePort, instance.Service.Attributes)
+	}
+	setUpstreamProtocol(pluginParams.Node, localCluster, instance.ServicePort, model.TrafficDirectionInbound)
+	// call plugins
+	for _, p := range configgen.Plugins {
+		p.OnInboundCluster(pluginParams, localCluster)
+	}
+
+	// When users specify circuit breakers, they need to be set on the receiver end
+	// (server side) as well as client side, so that the server has enough capacity
+	// (not the defaults) to handle the increased traffic volume
+	// TODO: This is not foolproof - if instance is part of multiple services listening on same port,
+	// choice of inbound cluster is arbitrary. So the connection pool settings may not apply cleanly.
+	cfg := pluginParams.Push.DestinationRule(pluginParams.Node, instance.Service)
+	if cfg != nil {
+		destinationRule := cfg.Spec.(*networking.DestinationRule)
+		if destinationRule.TrafficPolicy != nil {
+			connectionPool, _, _, _ := SelectTrafficPolicyComponents(destinationRule.TrafficPolicy, instance.ServicePort)
+			// only connection pool settings make sense on the inbound path.
+			// upstream TLS settings/outlier detection/load balancer don't apply here.
+			applyConnectionPool(pluginParams.Push, localCluster, connectionPool)
+			localCluster.Metadata = util.BuildConfigInfoMetadata(cfg.ConfigMeta)
+		}
+	}
+	return localCluster
 }
 
 func convertResolution(proxy *model.Proxy, service *model.Service) cluster.Cluster_DiscoveryType {
@@ -414,10 +448,10 @@ const (
 	autoDetected
 )
 
-// buildAutoMtlsSettings fills key cert fields for all TLSSettings when the mode is `ISTIO_MUTUAL`.
+// conditionallyConvertToIstioMtls fills key cert fields for all TLSSettings when the mode is `ISTIO_MUTUAL`.
 // If the (input) TLS setting is nil (i.e not set), *and* the service mTLS mode is STRICT, it also
 // creates and populates the config as if they are set as ISTIO_MUTUAL.
-func buildAutoMtlsSettings(
+func conditionallyConvertToIstioMtls(
 	tls *networking.ClientTLSSettings,
 	serviceAccounts []string,
 	sni string,
@@ -425,14 +459,20 @@ func buildAutoMtlsSettings(
 	autoMTLSEnabled bool,
 	meshExternal bool,
 	serviceMTLSMode model.MutualTLSMode) (*networking.ClientTLSSettings, mtlsContextType) {
-	if tls != nil {
-		if tls.Mode != networking.ClientTLSSettings_ISTIO_MUTUAL {
-			return tls, userSupplied
+	mtlsCtx := userSupplied
+	if tls == nil {
+		if meshExternal || !autoMTLSEnabled || serviceMTLSMode == model.MTLSUnknown || serviceMTLSMode == model.MTLSDisable {
+			return nil, mtlsCtx
 		}
-
-		// Update TLS settings for ISTIO_MUTUAL.
+		mtlsCtx = autoDetected
+		// we will setup transport sockets later
+		tls = &networking.ClientTLSSettings{
+			Mode: networking.ClientTLSSettings_ISTIO_MUTUAL,
+		}
+	}
+	if tls.Mode == networking.ClientTLSSettings_ISTIO_MUTUAL {
 		// Use client provided SNI if set. Otherwise, overwrite with the auto generated SNI
-		// user specified SNIs in the istio mtls settings are useful when routing via gateways.
+		// user specified SNIs in the istio mtls settings are useful when routing via gateways
 		sniToUse := tls.Sni
 		if len(sniToUse) == 0 {
 			sniToUse = sni
@@ -441,40 +481,47 @@ func buildAutoMtlsSettings(
 		if len(subjectAltNamesToUse) == 0 {
 			subjectAltNamesToUse = serviceAccounts
 		}
-		return buildIstioMutualTLS(subjectAltNamesToUse, sniToUse, proxy), userSupplied
+		return buildIstioMutualTLS(subjectAltNamesToUse, sniToUse, proxy), mtlsCtx
 	}
-
-	if meshExternal || !autoMTLSEnabled || serviceMTLSMode == model.MTLSUnknown || serviceMTLSMode == model.MTLSDisable {
-		return nil, userSupplied
-	}
-
-	// Build settings for auto MTLS.
-	return buildIstioMutualTLS(serviceAccounts, sni, proxy), autoDetected
+	return tls, mtlsCtx
 }
 
 // buildIstioMutualTLS returns a `TLSSettings` for ISTIO_MUTUAL mode.
 func buildIstioMutualTLS(serviceAccounts []string, sni string, proxy *model.Proxy) *networking.ClientTLSSettings {
 	return &networking.ClientTLSSettings{
 		Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
-		CaCertificates:    proxy.Metadata.TLSClientRootCert,
-		ClientCertificate: proxy.Metadata.TLSClientCertChain,
-		PrivateKey:        proxy.Metadata.TLSClientKey,
+		CaCertificates:    model.GetOrDefault(proxy.Metadata.TLSClientRootCert, constants.DefaultRootCert),
+		ClientCertificate: model.GetOrDefault(proxy.Metadata.TLSClientCertChain, constants.DefaultCertChain),
+		PrivateKey:        model.GetOrDefault(proxy.Metadata.TLSClientKey, constants.DefaultKey),
 		SubjectAltNames:   serviceAccounts,
 		Sni:               sni,
 	}
 }
 
 // SelectTrafficPolicyComponents returns the components of TrafficPolicy that should be used for given port.
-func selectTrafficPolicyComponents(policy *networking.TrafficPolicy) (
+func SelectTrafficPolicyComponents(policy *networking.TrafficPolicy, port *model.Port) (
 	*networking.ConnectionPoolSettings, *networking.OutlierDetection, *networking.LoadBalancerSettings, *networking.ClientTLSSettings) {
 	if policy == nil {
 		return nil, nil, nil, nil
 	}
+	// Default to traffic policy's settings.
 	connectionPool := policy.ConnectionPool
 	outlierDetection := policy.OutlierDetection
 	loadBalancer := policy.LoadBalancer
 	tls := policy.Tls
 
+	// Check if port level overrides exist, if yes override with them.
+	if port != nil && len(policy.PortLevelSettings) > 0 {
+		for _, p := range policy.PortLevelSettings {
+			if p.Port != nil && uint32(port.Port) == p.Port.Number {
+				connectionPool = p.ConnectionPool
+				outlierDetection = p.OutlierDetection
+				loadBalancer = p.LoadBalancer
+				tls = p.Tls
+				break
+			}
+		}
+	}
 	return connectionPool, outlierDetection, loadBalancer, tls
 }
 
@@ -489,7 +536,7 @@ const (
 )
 
 type buildClusterOpts struct {
-	mesh            *meshconfig.MeshConfig
+	push            *model.PushContext
 	cluster         *cluster.Cluster
 	policy          *networking.TrafficPolicy
 	port            *model.Port
@@ -528,7 +575,7 @@ var h2UpgradeMap = map[upgradeTuple]bool{
 
 // applyH2Upgrade function will upgrade outbound cluster to http2 if specified by configuration.
 func applyH2Upgrade(opts buildClusterOpts, connectionPool *networking.ConnectionPoolSettings) {
-	if shouldH2Upgrade(opts.cluster.Name, opts.direction, opts.port, opts.mesh, connectionPool) {
+	if shouldH2Upgrade(opts.cluster.Name, opts.direction, opts.port, opts.push.Mesh, connectionPool) {
 		setH2Options(opts.cluster)
 	}
 }
@@ -540,20 +587,6 @@ func shouldH2Upgrade(clusterName string, direction model.TrafficDirection, port 
 		return false
 	}
 
-	// TODO (mjog)
-	// Upgrade if tls.GetMode() == networking.TLSSettings_ISTIO_MUTUAL
-	override := networking.ConnectionPoolSettings_HTTPSettings_DEFAULT
-	if connectionPool != nil && connectionPool.Http != nil {
-		override = connectionPool.Http.H2UpgradePolicy
-	}
-	// If user wants an upgrade at destination rule/port level that means he is sure that
-	// it is a Http port - upgrade in such case. This is useful incase protocol sniffing is
-	// enabled and user wants to upgrade/preserve http protocol from client.
-	if override == networking.ConnectionPoolSettings_HTTPSettings_UPGRADE {
-		log.Debugf("Upgrading cluster: %v (%v %v)", clusterName, mesh.H2UpgradePolicy, override)
-		return true
-	}
-
 	// Do not upgrade non-http ports
 	// This also ensures that we are only upgrading named ports so that
 	// EnableProtocolSniffingForInbound does not interfere.
@@ -562,6 +595,13 @@ func shouldH2Upgrade(clusterName string, direction model.TrafficDirection, port 
 	// even though the application only supports http 1.1.
 	if port != nil && !port.Protocol.IsHTTP() {
 		return false
+	}
+
+	// TODO (mjog)
+	// Upgrade if tls.GetMode() == networking.TLSSettings_ISTIO_MUTUAL
+	override := networking.ConnectionPoolSettings_HTTPSettings_DEFAULT
+	if connectionPool != nil && connectionPool.Http != nil {
+		override = connectionPool.Http.H2UpgradePolicy
 	}
 
 	if !h2UpgradeMap[upgradeTuple{mesh.H2UpgradePolicy, override}] {
@@ -587,33 +627,26 @@ func setH2Options(cluster *cluster.Cluster) {
 }
 
 func applyTrafficPolicy(opts buildClusterOpts) {
-	connectionPool, outlierDetection, loadBalancer, tls := selectTrafficPolicyComponents(opts.policy)
-	if opts.direction == model.TrafficDirectionOutbound && connectionPool != nil && connectionPool.Http != nil && connectionPool.Http.UseClientProtocol {
-		setH2Options(opts.cluster)
-		// Use downstream protocol. If the incoming traffic use HTTP 1.1, the
-		// upstream cluster will use HTTP 1.1, if incoming traffic use HTTP2,
-		// the upstream cluster will use HTTP2.
-		opts.cluster.ProtocolSelection = cluster.Cluster_USE_DOWNSTREAM_PROTOCOL
-	}
+	connectionPool, outlierDetection, loadBalancer, tls := SelectTrafficPolicyComponents(opts.policy, opts.port)
 	// Connection pool settings are applicable for both inbound and outbound clusters.
-	applyConnectionPool(opts.mesh, opts.cluster, connectionPool)
+	applyConnectionPool(opts.push, opts.cluster, connectionPool)
 	if opts.direction != model.TrafficDirectionInbound {
 		applyH2Upgrade(opts, connectionPool)
 		applyOutlierDetection(opts.cluster, outlierDetection)
-		applyLoadBalancer(opts.cluster, loadBalancer, opts.port, opts.proxy, opts.mesh)
+		applyLoadBalancer(opts.cluster, loadBalancer, opts.port, opts.proxy, opts.push.Mesh)
 	}
 
 	if opts.clusterMode != SniDnatClusterMode && opts.direction != model.TrafficDirectionInbound {
-		autoMTLSEnabled := opts.mesh.GetEnableAutoMtls().Value
+		autoMTLSEnabled := opts.push.Mesh.GetEnableAutoMtls().Value
 		var mtlsCtxType mtlsContextType
-		tls, mtlsCtxType = buildAutoMtlsSettings(tls, opts.serviceAccounts, opts.istioMtlsSni, opts.proxy,
+		tls, mtlsCtxType = conditionallyConvertToIstioMtls(tls, opts.serviceAccounts, opts.istioMtlsSni, opts.proxy,
 			autoMTLSEnabled, opts.meshExternal, opts.serviceMTLSMode)
-		applyUpstreamTLSSettings(&opts, tls, mtlsCtxType)
+		applyUpstreamTLSSettings(&opts, tls, mtlsCtxType, opts.proxy)
 	}
 }
 
 // FIXME: there isn't a way to distinguish between unset values and zero values
-func applyConnectionPool(mesh *meshconfig.MeshConfig, c *cluster.Cluster, settings *networking.ConnectionPoolSettings) {
+func applyConnectionPool(push *model.PushContext, c *cluster.Cluster, settings *networking.ConnectionPoolSettings) {
 	if settings == nil {
 		return
 	}
@@ -652,7 +685,7 @@ func applyConnectionPool(mesh *meshconfig.MeshConfig, c *cluster.Cluster, settin
 			threshold.MaxConnections = &wrappers.UInt32Value{Value: uint32(settings.Tcp.MaxConnections)}
 		}
 
-		applyTCPKeepalive(mesh, c, settings)
+		applyTCPKeepalive(push, c, settings)
 	}
 
 	c.CircuitBreakers = &cluster.CircuitBreakers{
@@ -665,9 +698,9 @@ func applyConnectionPool(mesh *meshconfig.MeshConfig, c *cluster.Cluster, settin
 	}
 }
 
-func applyTCPKeepalive(mesh *meshconfig.MeshConfig, c *cluster.Cluster, settings *networking.ConnectionPoolSettings) {
+func applyTCPKeepalive(push *model.PushContext, c *cluster.Cluster, settings *networking.ConnectionPoolSettings) {
 	// Apply Keepalive config only if it is configured in mesh config or in destination rule.
-	if mesh.TcpKeepalive != nil || settings.Tcp.TcpKeepalive != nil {
+	if push.Mesh.TcpKeepalive != nil || settings.Tcp.TcpKeepalive != nil {
 
 		// Start with empty tcp_keepalive, which would set SO_KEEPALIVE on the socket with OS default values.
 		c.UpstreamConnectionOptions = &cluster.UpstreamConnectionOptions{
@@ -675,8 +708,8 @@ func applyTCPKeepalive(mesh *meshconfig.MeshConfig, c *cluster.Cluster, settings
 		}
 
 		// Apply mesh wide TCP keepalive if available.
-		if mesh.TcpKeepalive != nil {
-			setKeepAliveSettings(c, mesh.TcpKeepalive)
+		if push.Mesh.TcpKeepalive != nil {
+			setKeepAliveSettings(c, push.Mesh.TcpKeepalive)
 		}
 
 		// Apply/Override individual attributes with DestinationRule TCP keepalive if set.
@@ -836,23 +869,52 @@ func applyLocalityLBSetting(locality *core.Locality, cluster *cluster.Cluster, l
 	}
 }
 
-func applyUpstreamTLSSettings(opts *buildClusterOpts, tls *networking.ClientTLSSettings, mtlsCtxType mtlsContextType) {
+func applyUpstreamTLSSettings(opts *buildClusterOpts, tls *networking.ClientTLSSettings, mtlsCtxType mtlsContextType, node *model.Proxy) {
 	if tls == nil {
 		return
 	}
 
 	c := opts.cluster
+	proxy := opts.proxy
 
-	tlsContext, err := buildUpstreamClusterTLSContext(opts, tls)
+	certValidationContext := &auth.CertificateValidationContext{}
+	var trustedCa *core.DataSource
+
+	// Configure root cert for UpstreamTLSContext
+	if len(tls.CaCertificates) != 0 {
+		trustedCa = &core.DataSource{
+			Specifier: &core.DataSource_Filename{
+				Filename: model.GetOrDefault(proxy.Metadata.TLSClientRootCert, tls.CaCertificates),
+			},
+		}
+	}
+	if trustedCa != nil || len(tls.SubjectAltNames) > 0 {
+		certValidationContext = &auth.CertificateValidationContext{
+			TrustedCa:            trustedCa,
+			MatchSubjectAltNames: util.StringToExactMatch(tls.SubjectAltNames),
+		}
+	}
+
+	tlsContext, err := buildUpstreamClusterTLSContext(opts, tls, node, certValidationContext)
 	if err != nil {
 		log.Errorf("failed to build Upstream TLSContext: %s", err.Error())
 		return
 	}
 
 	if tlsContext != nil {
+		tc := util.MessageToAny(tlsContext)
+		// Moving from v2 tls <-> v3 tls seems to cause downtime: https://github.com/envoyproxy/envoy/issues/13864
+		// Instead, we should tie this to the cluster version, which is fixed, so we do not switch at runtime during
+		// an in place upgrade of the control plane only
+		// However, there is an edge case: users with 1.6 proxy, connecting to 1.7.x control plane without this code, then updating
+		// to 1.7.y control plane with this code. This would cause this code to cause another downtime by downgrading from v3 to v2.
+		// To workaround this, we will have a flag to disable this behavior
+		if features.EnableTLSXDSDynamicTypes && node.RequestedTypes.CDS == xdsv2.ClusterType {
+			tc.TypeUrl = "type.googleapis.com/envoy.api.v2.auth.UpstreamTlsContext"
+		}
 		c.TransportSocket = &core.TransportSocket{
 			Name:       util.EnvoyTLSSocketName,
-			ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: util.MessageToAny(tlsContext)},
+			ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: tc},
 		}
 	}
 
@@ -865,23 +927,26 @@ func applyUpstreamTLSSettings(opts *buildClusterOpts, tls *networking.ClientTLSS
 			c.TransportSocket = nil
 			c.TransportSocketMatches = []*cluster.Cluster_TransportSocketMatch{
 				{
-					Name:            "tlsMode-" + model.IstioMutualTLSModeLabel,
-					Match:           istioMtlsTransportSocketMatch,
+					Name: "tlsMode-" + model.IstioMutualTLSModeLabel,
+					Match: &structpb.Struct{
+						Fields: map[string]*structpb.Value{
+							model.TLSModeLabelShortname: {Kind: &structpb.Value_StringValue{StringValue: model.IstioMutualTLSModeLabel}},
+						},
+					},
 					TransportSocket: transportSocket,
 				},
 				defaultTransportSocketMatch,
 			}
+		} else {
+			// Since previous calls to applyTrafficPolicy may have set TransportSocketMatches for a subset cluster
+			// make sure they are reset.  See https://github.com/istio/istio/issues/23910
+			c.TransportSocketMatches = nil
 		}
 	}
 }
 
-var istioMtlsTransportSocketMatch = &structpb.Struct{
-	Fields: map[string]*structpb.Value{
-		model.TLSModeLabelShortname: {Kind: &structpb.Value_StringValue{StringValue: model.IstioMutualTLSModeLabel}},
-	},
-}
-
-func buildUpstreamClusterTLSContext(opts *buildClusterOpts, tls *networking.ClientTLSSettings) (*auth.UpstreamTlsContext, error) {
+func buildUpstreamClusterTLSContext(opts *buildClusterOpts, tls *networking.ClientTLSSettings,
+	node *model.Proxy, certValidationContext *auth.CertificateValidationContext) (*auth.UpstreamTlsContext, error) {
 	c := opts.cluster
 	proxy := opts.proxy
 
@@ -899,37 +964,50 @@ func buildUpstreamClusterTLSContext(opts *buildClusterOpts, tls *networking.Clie
 	case networking.ClientTLSSettings_DISABLE:
 		tlsContext = nil
 	case networking.ClientTLSSettings_ISTIO_MUTUAL:
+		// conditionallyConvertToIstioMtls populates ClientCertificate and PrivateKey for tls
+		// Following condition will never be true in case of ISTIO_MUTUAL and only exists for safeguard
+		if tls.ClientCertificate == "" || tls.PrivateKey == "" {
+			err := fmt.Errorf("failed to apply tls setting for %s: client certificate and private key must not be empty",
+				c.Name)
+			return nil, err
+		}
 
 		tlsContext = &auth.UpstreamTlsContext{
 			CommonTlsContext: &auth.CommonTlsContext{},
 			Sni:              tls.Sni,
 		}
 
-		// For ISTIO_MUTUAL_TLS we serve certificates from two well known locations.
-		// - Proxy Metadata: These are certs being mounted from within the pod. Rather
-		//   than reading directly in Envoy, which does not support rotation, we will
-		//   serve them over SDS by reading the files.
-		// - Default SDS Locations served with resource names "default" and "ROOTCA".
+		// TODO: cleanup required check out istio/istio/pull/24822 as SDS is enabled by default
+		if !node.Metadata.SdsEnabled || opts.push.Mesh.SdsUdsPath == "" {
+			tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_ValidationContext{
+				ValidationContext: certValidationContext,
+			}
+			tlsContext.CommonTlsContext.TlsCertificates = []*auth.TlsCertificate{
+				{
+					CertificateChain: &core.DataSource{
+						Specifier: &core.DataSource_Filename{
+							Filename: model.GetOrDefault(proxy.Metadata.TLSClientCertChain, tls.ClientCertificate),
+						},
+					},
+					PrivateKey: &core.DataSource{
+						Specifier: &core.DataSource_Filename{
+							Filename: model.GetOrDefault(proxy.Metadata.TLSClientKey, tls.PrivateKey),
+						},
+					},
+				},
+			}
+		} else {
+			tlsContext.CommonTlsContext.TlsCertificateSdsSecretConfigs = append(tlsContext.CommonTlsContext.TlsCertificateSdsSecretConfigs,
+				authn_model.ConstructSdsSecretConfig(authn_model.SDSDefaultResourceName, node.RequestedTypes.CDS))
 
-		// buildIstioMutualTLS would have populated the TLSSettings with proxy metadata.
-		// Use it if it exists otherwise fallback to default SDS locations.
-		metadataSDS := model.SdsCertificateConfig{
-			CertificatePath:   tls.ClientCertificate,
-			PrivateKeyPath:    tls.PrivateKey,
-			CaCertificatePath: tls.CaCertificates,
+			tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_CombinedValidationContext{
+				CombinedValidationContext: &auth.CommonTlsContext_CombinedCertificateValidationContext{
+					DefaultValidationContext:         &auth.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch(tls.SubjectAltNames)},
+					ValidationContextSdsSecretConfig: authn_model.ConstructSdsSecretConfig(authn_model.SDSRootResourceName, node.RequestedTypes.CDS),
+				},
+			}
 		}
-		metadataCerts := metadataSDS.IsRootCertificate() && metadataSDS.IsKeyCertificate()
 
-		tlsContext.CommonTlsContext.TlsCertificateSdsSecretConfigs = append(tlsContext.CommonTlsContext.TlsCertificateSdsSecretConfigs,
-			authn_model.ConstructSdsSecretConfig(model.GetOrDefault(metadataSDS.GetResourceName(), authn_model.SDSDefaultResourceName)))
-
-		tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_CombinedValidationContext{
-			CombinedValidationContext: &auth.CommonTlsContext_CombinedCertificateValidationContext{
-				DefaultValidationContext: &auth.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch(tls.SubjectAltNames)},
-				ValidationContextSdsSecretConfig: authn_model.ConstructSdsSecretConfig(model.GetOrDefault(metadataSDS.GetRootResourceName(),
-					authn_model.SDSRootResourceName)),
-			},
-		}
 		// Set default SNI of cluster name for istio_mutual if sni is not set.
 		if len(tls.Sni) == 0 {
 			tlsContext.Sni = c.Name
@@ -938,63 +1016,63 @@ func buildUpstreamClusterTLSContext(opts *buildClusterOpts, tls *networking.Clie
 		// `istio-peer-exchange` alpn is only used when using mtls communication between peers.
 		// We add `istio-peer-exchange` to the list of alpn strings.
 		// The code has repeated snippets because We want to use predefined alpn strings for efficiency.
-		switch {
-		case metadataCerts:
-			if c.Http2ProtocolOptions != nil {
-				// This is HTTP/2 cluster, advertise it with ALPN.
-				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNH2Only
-			}
-		default:
-			if c.Http2ProtocolOptions != nil {
-				// This is HTTP/2 in-mesh cluster, advertise it with ALPN.
-				// Enable sending `istio-peer-exchange`	ALPN in ALPN list if TCP
-				// metadataexchange is enabled.
-				if features.EnableTCPMetadataExchange {
-					tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2WithMxc
-				} else {
-					tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2
-				}
+		if c.Http2ProtocolOptions != nil {
+			// This is HTTP/2 in-mesh cluster, advertise it with ALPN.
+			// Enable sending `istio-peer-exchange`	ALPN in ALPN list if TCP
+			// metadataexchange is enabled.
+			if features.EnableTCPMetadataExchange {
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2WithMxc
 			} else {
-				// This is in-mesh cluster, advertise it with ALPN.
-				// Also, Enable sending `istio-peer-exchange` ALPN in ALPN list if TCP
-				// metadataexchange is enabled.
-				if features.EnableTCPMetadataExchange {
-					tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshWithMxc
-				} else {
-					tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMesh
-				}
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2
+			}
+		} else {
+			// This is in-mesh cluster, advertise it with ALPN.
+			// Also, Enable sending `istio-peer-exchange` ALPN in ALPN list if TCP
+			// metadataexchange is enabled.
+			if features.EnableTCPMetadataExchange {
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshWithMxc
+			} else {
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMesh
 			}
 		}
 	case networking.ClientTLSSettings_SIMPLE:
-		tlsContext = &auth.UpstreamTlsContext{
-			CommonTlsContext: &auth.CommonTlsContext{},
-			Sni:              tls.Sni,
-		}
-
 		if tls.CredentialName != "" {
 			tlsContext = &auth.UpstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{},
 				Sni:              tls.Sni,
 			}
+
 			// If  credential name is specified at Destination Rule config and originating node is egress gateway, create
 			// SDS config for egress gateway to fetch key/cert at gateway agent.
-			authn_model.ApplyCustomSDSToClientCommonTLSContext(tlsContext.CommonTlsContext, tls)
-		} else {
-			// If CredentialName is not set fallback to files specified in DR.
-			res := model.SdsCertificateConfig{
-				CaCertificatePath: model.GetOrDefault(proxy.Metadata.TLSClientRootCert, tls.CaCertificates),
-			}
+			authn_model.ApplyCustomSDSToClientCommonTLSContext(tlsContext.CommonTlsContext, tls, authn_model.GatewaySdsUdsPath, node.RequestedTypes.CDS)
 
-			// If tls.CaCertificate or CaCertificate in Metadata isn't configured don't set up SdsSecretConfig
-			if !res.IsRootCertificate() {
-				tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_ValidationContext{}
-			} else {
-				tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_CombinedValidationContext{
-					CombinedValidationContext: &auth.CommonTlsContext_CombinedCertificateValidationContext{
-						DefaultValidationContext:         &auth.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch(tls.SubjectAltNames)},
-						ValidationContextSdsSecretConfig: authn_model.ConstructSdsSecretConfig(res.GetRootResourceName()),
-					},
-				}
+			if c.Http2ProtocolOptions != nil {
+				// This is HTTP/2 cluster, advertise it with ALPN.
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNH2Only
+			}
+			return tlsContext, nil
+		}
+
+		// If CredentialName is not set fallback to file based approach
+		res := model.SdsCertificateConfig{
+			CaCertificatePath: model.GetOrDefault(proxy.Metadata.TLSClientRootCert, tls.CaCertificates),
+		}
+
+		tlsContext = &auth.UpstreamTlsContext{
+			CommonTlsContext: &auth.CommonTlsContext{},
+			Sni:              tls.Sni,
+		}
+
+		// If tls.CaCertificate or CaCertificate in Metadata isn't configured don't set up SdsSecretConfig
+		if res.GetRootResourceName() == "" {
+			tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_ValidationContext{}
+			tlsContext.Sni = tls.Sni
+		} else {
+			tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_CombinedValidationContext{
+				CombinedValidationContext: &auth.CommonTlsContext_CombinedCertificateValidationContext{
+					DefaultValidationContext:         &auth.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch(tls.SubjectAltNames)},
+					ValidationContextSdsSecretConfig: authn_model.ConstructSdsSecretConfig(res.GetRootResourceName(), node.RequestedTypes.CDS),
+				},
 			}
 		}
 
@@ -1004,58 +1082,77 @@ func buildUpstreamClusterTLSContext(opts *buildClusterOpts, tls *networking.Clie
 		}
 
 	case networking.ClientTLSSettings_MUTUAL:
+		if tls.CredentialName != "" {
+			tlsContext = &auth.UpstreamTlsContext{
+				CommonTlsContext: &auth.CommonTlsContext{},
+				Sni:              tls.Sni,
+			}
+
+			// If  credential name is specified at Destination Rule config and originating node is egress gateway, create
+			// SDS config for egress gateway to fetch key/cert at gateway agent.
+			authn_model.ApplyCustomSDSToClientCommonTLSContext(tlsContext.CommonTlsContext, tls, authn_model.GatewaySdsUdsPath, node.RequestedTypes.CDS)
+
+			if c.Http2ProtocolOptions != nil {
+				// This is HTTP/2 cluster, advertise it with ALPN.
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNH2Only
+			}
+			return tlsContext, nil
+		}
+
+		// If CredentialName is not set fallback to file based approach
+		if tls.ClientCertificate == "" || tls.PrivateKey == "" {
+			err := fmt.Errorf("failed to apply tls setting for %s: client certificate and private key must not be empty",
+				c.Name)
+			return nil, err
+		}
+
 		tlsContext = &auth.UpstreamTlsContext{
 			CommonTlsContext: &auth.CommonTlsContext{},
 			Sni:              tls.Sni,
 		}
-		if tls.CredentialName != "" {
-			// If  credential name is specified at Destination Rule config and originating node is egress gateway, create
-			// SDS config for egress gateway to fetch key/cert at gateway agent.
-			authn_model.ApplyCustomSDSToClientCommonTLSContext(tlsContext.CommonTlsContext, tls)
-		} else {
-			// If CredentialName is not set fallback to file based approach
-			if tls.ClientCertificate == "" || tls.PrivateKey == "" {
-				err := fmt.Errorf("failed to apply tls setting for %s: client certificate and private key must not be empty",
-					c.Name)
-				return nil, err
+		// Fallback to file mount secret instead of SDS if meshConfig.sdsUdsPath isn't set or SDS is disabled
+		if !node.Metadata.SdsEnabled || opts.push.Mesh.SdsUdsPath == "" {
+			tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_ValidationContext{
+				ValidationContext: certValidationContext,
 			}
-
-			var res model.SdsCertificateConfig
-			if features.AllowMetadataCertsInMutualTLS {
-				// These are certs being mounted from within the pod and specified in Metadata.
-				// Rather than reading directly in Envoy, which does not support rotation, we will
-				// serve them over SDS by reading the files. This is only enabled for temporary migration.
-				res = model.SdsCertificateConfig{
-					CertificatePath:   model.GetOrDefault(proxy.Metadata.TLSClientCertChain, tls.ClientCertificate),
-					PrivateKeyPath:    model.GetOrDefault(proxy.Metadata.TLSClientKey, tls.PrivateKey),
-					CaCertificatePath: model.GetOrDefault(proxy.Metadata.TLSClientRootCert, tls.CaCertificates),
-				}
-			} else {
-				// These are certs being mounted from within the pod and specified in Destination Rules.
-				// Rather than reading directly in Envoy, which does not support rotation, we will
-				// serve them over SDS by reading the files.
-				res = model.SdsCertificateConfig{
-					CertificatePath:   tls.ClientCertificate,
-					PrivateKeyPath:    tls.PrivateKey,
-					CaCertificatePath: tls.CaCertificates,
-				}
+			tlsContext.CommonTlsContext.TlsCertificates = []*auth.TlsCertificate{
+				{
+					CertificateChain: &core.DataSource{
+						Specifier: &core.DataSource_Filename{
+							Filename: model.GetOrDefault(proxy.Metadata.TLSClientCertChain, tls.ClientCertificate),
+						},
+					},
+					PrivateKey: &core.DataSource{
+						Specifier: &core.DataSource_Filename{
+							Filename: model.GetOrDefault(proxy.Metadata.TLSClientKey, tls.PrivateKey),
+						},
+					},
+				},
+			}
+		} else {
+			// These are certs being mounted from within the pod. Rather than reading directly in Envoy,
+			// which does not support rotation, we will serve them over SDS by reading the files.
+			res := model.SdsCertificateConfig{
+				CertificatePath:   model.GetOrDefault(proxy.Metadata.TLSClientCertChain, tls.ClientCertificate),
+				PrivateKeyPath:    model.GetOrDefault(proxy.Metadata.TLSClientKey, tls.PrivateKey),
+				CaCertificatePath: model.GetOrDefault(proxy.Metadata.TLSClientRootCert, tls.CaCertificates),
 			}
 			tlsContext.CommonTlsContext.TlsCertificateSdsSecretConfigs = append(tlsContext.CommonTlsContext.TlsCertificateSdsSecretConfigs,
-				authn_model.ConstructSdsSecretConfig(res.GetResourceName()))
+				authn_model.ConstructSdsSecretConfig(res.GetResourceName(), node.RequestedTypes.CDS))
 
 			// If tls.CaCertificate or CaCertificate in Metadata isn't configured don't set up RootSdsSecretConfig
-			if !res.IsRootCertificate() {
+			if res.GetRootResourceName() == "" {
 				tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_ValidationContext{}
+				tlsContext.Sni = tls.Sni
 			} else {
 				tlsContext.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_CombinedValidationContext{
 					CombinedValidationContext: &auth.CommonTlsContext_CombinedCertificateValidationContext{
 						DefaultValidationContext:         &auth.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch(tls.SubjectAltNames)},
-						ValidationContextSdsSecretConfig: authn_model.ConstructSdsSecretConfig(res.GetRootResourceName()),
+						ValidationContextSdsSecretConfig: authn_model.ConstructSdsSecretConfig(res.GetRootResourceName(), node.RequestedTypes.CDS),
 					},
 				}
 			}
 		}
-
 		if c.Http2ProtocolOptions != nil {
 			// This is HTTP/2 cluster, advertise it with ALPN.
 			tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNH2Only
@@ -1083,124 +1180,4 @@ func setUpstreamProtocol(node *model.Proxy, c *cluster.Cluster, port *model.Port
 		// the upstream cluster will use HTTP2.
 		c.ProtocolSelection = cluster.Cluster_USE_DOWNSTREAM_PROTOCOL
 	}
-}
-
-func addTelemetryMetadata(opts buildClusterOpts, service *model.Service, direction model.TrafficDirection, instances []*model.ServiceInstance) {
-	if opts.cluster == nil {
-		return
-	}
-	if direction == model.TrafficDirectionInbound && (opts.proxy == nil || opts.proxy.ServiceInstances == nil ||
-		len(opts.proxy.ServiceInstances) == 0 || opts.port == nil) {
-		// At inbound, port and local service instance has to be provided
-		return
-	}
-	if direction == model.TrafficDirectionOutbound && service == nil {
-		// At outbound, the service corresponding to the cluster has to be provided.
-		return
-	}
-
-	im := getOrCreateIstioMetadata(opts.cluster)
-
-	// Add services field into istio metadata
-	im.Fields["services"] = &structpb.Value{
-		Kind: &structpb.Value_ListValue{
-			ListValue: &structpb.ListValue{
-				Values: []*structpb.Value{},
-			},
-		},
-	}
-
-	svcMetaList := im.Fields["services"].GetListValue()
-
-	// Add service related metadata. This will be consumed by telemetry v2 filter for metric labels.
-	if direction == model.TrafficDirectionInbound {
-		// For inbound cluster, add all services on the cluster port
-		have := make(map[host.Name]bool)
-		for _, svc := range instances {
-			if svc.ServicePort.Port != opts.port.Port {
-				// If the service port is different from the the port of the cluster that is being built,
-				// skip adding telemetry metadata for the service to the cluster.
-				continue
-			}
-			if _, ok := have[svc.Service.Hostname]; ok {
-				// Skip adding metadata for instance with the same host name.
-				// This could happen when a service has multiple IPs.
-				continue
-			}
-			svcMetaList.Values = append(svcMetaList.Values, buildServiceMetadata(svc.Service))
-			have[svc.Service.Hostname] = true
-		}
-	} else if direction == model.TrafficDirectionOutbound {
-		// For outbound cluster, add telemetry metadata based on the service that the cluster is built for.
-		svcMetaList.Values = append(svcMetaList.Values, buildServiceMetadata(service))
-	}
-}
-
-// Insert the original port into the istio metadata. The port is used in BTS delivered from client sidecar to server sidecar.
-// Server side car uses this port after de-multiplexed from tunnel.
-func addNetworkingMetadata(opts buildClusterOpts, service *model.Service, direction model.TrafficDirection) {
-	if opts.cluster == nil || direction == model.TrafficDirectionInbound {
-		return
-	}
-	if service == nil {
-		// At outbound, the service corresponding to the cluster has to be provided.
-		return
-	}
-
-	if port, ok := service.Ports.GetByPort(opts.port.Port); ok {
-		im := getOrCreateIstioMetadata(opts.cluster)
-
-		// Add original_port field into istio metadata
-		// Endpoint could override this port but the chance should be small.
-		im.Fields["default_original_port"] = &structpb.Value{
-			Kind: &structpb.Value_NumberValue{
-				NumberValue: float64(port.Port),
-			},
-		}
-	}
-}
-
-// Build a struct which contains service metadata and will be added into cluster label.
-func buildServiceMetadata(svc *model.Service) *structpb.Value {
-	return &structpb.Value{
-		Kind: &structpb.Value_StructValue{
-			StructValue: &structpb.Struct{
-				Fields: map[string]*structpb.Value{
-					// service fqdn
-					"host": {
-						Kind: &structpb.Value_StringValue{
-							StringValue: string(svc.Hostname),
-						},
-					},
-					// short name of the service
-					"name": {
-						Kind: &structpb.Value_StringValue{
-							StringValue: svc.Attributes.Name,
-						},
-					},
-					// namespace of the service
-					"namespace": {
-						Kind: &structpb.Value_StringValue{
-							StringValue: svc.Attributes.Namespace,
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func getOrCreateIstioMetadata(cluster *cluster.Cluster) *structpb.Struct {
-	if cluster.Metadata == nil {
-		cluster.Metadata = &core.Metadata{
-			FilterMetadata: map[string]*structpb.Struct{},
-		}
-	}
-	// Create Istio metadata if does not exist yet
-	if _, ok := cluster.Metadata.FilterMetadata[util.IstioMetadataKey]; !ok {
-		cluster.Metadata.FilterMetadata[util.IstioMetadataKey] = &structpb.Struct{
-			Fields: map[string]*structpb.Value{},
-		}
-	}
-	return cluster.Metadata.FilterMetadata[util.IstioMetadataKey]
 }

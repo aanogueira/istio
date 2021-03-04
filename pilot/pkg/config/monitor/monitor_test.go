@@ -22,16 +22,17 @@ import (
 	"github.com/onsi/gomega"
 
 	networking "istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pilot/pkg/config/memory"
-	"istio.io/istio/pkg/config"
+	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
 )
 
-var createConfigSet = []*config.Config{
+var createConfigSet = []*model.Config{
 	{
-		Meta: config.Meta{
+		ConfigMeta: model.ConfigMeta{
 			Name:             "magic",
 			GroupVersionKind: gvk.Gateway,
 		},
@@ -50,9 +51,9 @@ var createConfigSet = []*config.Config{
 	},
 }
 
-var updateConfigSet = []*config.Config{
+var updateConfigSet = []*model.Config{
 	{
-		Meta: config.Meta{
+		ConfigMeta: model.ConfigMeta{
 			Name:             "magic",
 			GroupVersionKind: gvk.Gateway,
 		},
@@ -72,17 +73,17 @@ var updateConfigSet = []*config.Config{
 }
 
 func TestMonitorForChange(t *testing.T) {
-	g := gomega.NewWithT(t)
+	g := gomega.NewGomegaWithT(t)
 
 	store := memory.Make(collection.SchemasFor(collections.IstioNetworkingV1Alpha3Gateways))
 
 	var (
 		callCount int
-		configs   []*config.Config
+		configs   []*model.Config
 		err       error
 	)
 
-	someConfigFunc := func() ([]*config.Config, error) {
+	someConfigFunc := func() ([]*model.Config, error) {
 		switch callCount {
 		case 0:
 			configs = createConfigSet
@@ -90,7 +91,7 @@ func TestMonitorForChange(t *testing.T) {
 		case 3:
 			configs = updateConfigSet
 		case 6:
-			configs = []*config.Config{}
+			configs = []*model.Config{}
 		}
 
 		callCount++
@@ -115,7 +116,7 @@ func TestMonitorForChange(t *testing.T) {
 			return errors.New("no configs")
 		}
 
-		if c[0].Meta.Name != "magic" {
+		if c[0].ConfigMeta.Name != "magic" {
 			return errors.New("wrong config")
 		}
 
@@ -137,26 +138,26 @@ func TestMonitorForChange(t *testing.T) {
 		return nil
 	}).Should(gomega.Succeed())
 
-	g.Eventually(func() ([]config.Config, error) {
+	g.Eventually(func() ([]model.Config, error) {
 		return store.List(gvk.Gateway, "")
 	}).Should(gomega.HaveLen(0))
 
 }
 
 func TestMonitorForError(t *testing.T) {
-	g := gomega.NewWithT(t)
+	g := gomega.NewGomegaWithT(t)
 
 	store := memory.Make(collection.SchemasFor(collections.IstioNetworkingV1Alpha3Gateways))
 
 	var (
 		callCount int
-		configs   []*config.Config
+		configs   []*model.Config
 		err       error
 	)
 
 	delay := make(chan struct{}, 1)
 
-	someConfigFunc := func() ([]*config.Config, error) {
+	someConfigFunc := func() ([]*model.Config, error) {
 		switch callCount {
 		case 0:
 			configs = createConfigSet

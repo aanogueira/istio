@@ -26,8 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/etcd/pkg/fileutil"
+
 	"istio.io/istio/cni/pkg/install-cni/pkg/util"
-	"istio.io/istio/pkg/file"
 	"istio.io/istio/pkg/test/env"
 )
 
@@ -141,7 +142,7 @@ func rmCNIConfig(cniConfigFilepath string, t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = file.AtomicWrite(cniConfigFilepath, cniConfig, os.FileMode(0644)); err != nil {
+	if err = util.AtomicWrite(cniConfigFilepath, cniConfig, os.FileMode(0644)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -376,7 +377,7 @@ func doTest(testNum int, chainedCNIPlugin bool, wd, preConfFile, resultFileName,
 			compareConfResult(testWorkRootDir, resultFile, expectedPostCleanFile, t)
 		}
 	} else {
-		if file.Exists(resultFile) {
+		if fileutil.Exist(resultFile) {
 			t.Logf("FAIL: Istio CNI config file was not removed: %s", resultFile)
 		}
 	}

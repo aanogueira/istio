@@ -18,18 +18,20 @@ import (
 	"testing"
 	"time"
 
+	"istio.io/pkg/ledger"
+
+	"istio.io/istio/pilot/pkg/config/memory"
+	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pilot/pkg/xds"
+	"istio.io/istio/pkg/config/schema/collections"
+
 	. "github.com/onsi/gomega"
 	"k8s.io/utils/clock"
-
-	"istio.io/istio/pilot/pkg/xds"
-	"istio.io/istio/pkg/config"
-	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/pkg/ledger"
 )
 
 func TestStatusMaps(t *testing.T) {
 	r := initReporterWithoutStarting()
-	typ := ""
+	typ := xds.UnknownEventType
 	r.processEvent("conA", typ, "a")
 	r.processEvent("conB", typ, "a")
 	r.processEvent("conC", typ, "c")
@@ -52,7 +54,8 @@ func initReporterWithoutStarting() (out Reporter) {
 	out.client = nil              // TODO
 	out.clock = clock.RealClock{} // TODO
 	out.UpdateInterval = 300 * time.Millisecond
-	out.cm = nil // TODO
+	out.store = nil // TODO
+	out.cm = nil    // TODO
 	out.reverseStatus = make(map[string]map[string]struct{})
 	out.status = make(map[string]string)
 	return
@@ -61,24 +64,25 @@ func initReporterWithoutStarting() (out Reporter) {
 func TestBuildReport(t *testing.T) {
 	RegisterTestingT(t)
 	r := initReporterWithoutStarting()
-	r.ledger = ledger.Make(time.Minute)
-	resources := []*config.Config{
+	r.store = memory.Make(collections.All)
+	l := ledger.Make(time.Minute)
+	resources := []*model.Config{
 		{
-			Meta: config.Meta{
+			ConfigMeta: model.ConfigMeta{
 				Namespace:       "default",
 				Name:            "foo",
 				ResourceVersion: "1",
 			},
 		},
 		{
-			Meta: config.Meta{
+			ConfigMeta: model.ConfigMeta{
 				Namespace:       "default",
 				Name:            "bar",
 				ResourceVersion: "1",
 			},
 		},
 		{
-			Meta: config.Meta{
+			ConfigMeta: model.ConfigMeta{
 				Namespace:       "alternate",
 				Name:            "boo",
 				ResourceVersion: "1",
@@ -91,28 +95,35 @@ func TestBuildReport(t *testing.T) {
 	for _, res := range resources {
 		// Set Group Version and GroupVersionKind to real world values from VS
 		res.GroupVersionKind = col.GroupVersionKind()
+		resStr := res.Key()
 		myResources = append(myResources, *ResourceFromModelConfig(*res))
 		// Add each resource to our ledger for tracking history
+		_, err := l.Put(resStr, res.ResourceVersion)
 		// mark each of our resources as in flight so they are included in the report.
 		r.AddInProgressResource(*res)
+		Expect(err).NotTo(HaveOccurred())
 	}
-	firstNoncePrefix := r.ledger.RootHash()
+	firstNoncePrefix := l.RootHash()
 	connections := []string{
 		"conA", "conB", "conC",
 	}
 	// mark each fake connection as having acked version 1 of all resources
 	for _, con := range connections {
-		r.processEvent(con, "", firstNoncePrefix)
+		r.processEvent(con, xds.UnknownEventType, firstNoncePrefix)
 	}
 	// modify one resource to version 2
 	resources[1].ResourceVersion = "2"
 	myResources[1].ResourceVersion = "2"
 	// notify the ledger of the new version
+	_, err := l.Put(resources[1].Key(), "2")
 	r.AddInProgressResource(*resources[1])
+	Expect(err).NotTo(HaveOccurred())
 	// mark only one connection as having acked version 2
-	r.processEvent(connections[1], "", r.ledger.RootHash())
+	r.processEvent(connections[1], "", l.RootHash())
 	// mark one connection as having disconnected.
-	r.RegisterDisconnect(connections[2], []xds.EventType{""})
+	r.RegisterDisconnect(connections[2], []xds.EventType{xds.UnknownEventType})
+	err = r.store.SetLedger(l)
+	Expect(err).NotTo(HaveOccurred())
 	// build a report, which should have only two dataplanes, with 50% acking v2 of config
 	rpt, prunes := r.buildReport()
 	r.removeCompletedResource(prunes)

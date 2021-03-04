@@ -1,4 +1,3 @@
-// +build integ
 //  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +22,7 @@ import (
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
+
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 )
@@ -33,7 +33,6 @@ import (
 // on Minikube. For more details, see https://github.com/istio/istio/issues/12754.
 func TestMtlsHealthCheck(t *testing.T) {
 	framework.NewTest(t).
-		Features("security.healthcheck").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{Prefix: "healthcheck", Inject: true})
 			for _, testCase := range []struct {
@@ -88,7 +87,7 @@ spec:
 	if !rewrite {
 		cfg.ReadinessTimeout = time.Second * 15
 	}
-	_, err := echoboot.NewBuilder(ctx).
+	err := echoboot.NewBuilderOrFail(t, ctx).
 		With(&healthcheck, cfg).
 		Build()
 	gotSuccess := err == nil

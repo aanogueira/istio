@@ -23,13 +23,10 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes/any"
 	structpb "github.com/golang/protobuf/ptypes/struct"
-	"golang.org/x/time/rate"
 
-	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
-	v3 "istio.io/istio/pilot/pkg/xds/v3"
-	"istio.io/istio/pkg/queue"
+	pilot_xds_v3 "istio.io/istio/pilot/pkg/xds/v3"
 	"istio.io/pkg/log"
 )
 
@@ -55,48 +52,31 @@ const (
 type InternalGen struct {
 	Server *DiscoveryServer
 
-	// TODO move WorkloadEntry related tasks into their own object and give InternalGen a reference.
-	// store should either be k8s (for running pilot) or in-memory (for tests). MCP and other config store implementations
-	// do not support writing. We only use it here for reading WorkloadEntry/WorkloadGroup.
-	store model.ConfigStoreCache
-	// cleanupLimit rate limit's autoregistered WorkloadEntry cleanup calls to k8s
-	cleanupLimit *rate.Limiter
-	// cleanupQueue delays the cleanup of autoregsitered WorkloadEntries to allow for grace period
-	cleanupQueue queue.Delayed
-
 	// TODO: track last N Nacks and connection events, with 'version' based on timestamp.
 	// On new connect, use version to send recent events since last update.
 }
 
-func NewInternalGen(s *DiscoveryServer) *InternalGen {
-	return &InternalGen{
-		Server: s,
-	}
-}
-
 func (sg *InternalGen) OnConnect(con *Connection) {
-	if con.node.Metadata != nil && con.node.Metadata.Fields != nil {
-		con.node.Metadata.Fields["istiod"] = &structpb.Value{
+	if con.xdsNode.Metadata != nil && con.xdsNode.Metadata.Fields != nil {
+		con.xdsNode.Metadata.Fields["istiod"] = &structpb.Value{
 			Kind: &structpb.Value_StringValue{
 				StringValue: "TODO", // TODO: fill in the Istiod address - may include network, cluster, IP
 			},
 		}
-		con.node.Metadata.Fields["con"] = &structpb.Value{
+		con.xdsNode.Metadata.Fields["con"] = &structpb.Value{
 			Kind: &structpb.Value_StringValue{
 				StringValue: con.ConID,
 			},
 		}
 	}
-	sg.startPush(TypeURLConnections, []proto.Message{con.node})
+	sg.startPush(TypeURLConnections, []proto.Message{con.xdsNode})
 }
 
 func (sg *InternalGen) OnDisconnect(con *Connection) {
-	sg.QueueUnregisterWorkload(con.proxy)
+	sg.startPush(TypeURLDisconnect, []proto.Message{con.xdsNode})
 
-	sg.startPush(TypeURLDisconnect, []proto.Message{con.node})
-
-	if con.node.Metadata != nil && con.node.Metadata.Fields != nil {
-		con.node.Metadata.Fields["istiod"] = &structpb.Value{
+	if con.xdsNode.Metadata != nil && con.xdsNode.Metadata.Fields != nil {
+		con.xdsNode.Metadata.Fields["istiod"] = &structpb.Value{
 			Kind: &structpb.Value_StringValue{
 				StringValue: "", // TODO: using empty string to indicate this node has no istiod connection. We'll iterate.
 			},
@@ -106,26 +86,8 @@ func (sg *InternalGen) OnDisconnect(con *Connection) {
 	// Note that it is quite possible for a 'connect' on a different istiod to happen before a disconnect.
 }
 
-func (sg *InternalGen) EnableWorkloadEntryController(store model.ConfigStoreCache) {
-	if features.WorkloadEntryAutoRegistration {
-		sg.store = store
-		sg.cleanupLimit = rate.NewLimiter(rate.Limit(20), 1)
-		sg.cleanupQueue = queue.NewDelayed()
-	}
-}
-
-func (sg *InternalGen) Run(stop <-chan struct{}) {
-	if sg.store != nil && sg.cleanupQueue != nil {
-		go sg.periodicWorkloadEntryCleanup(stop)
-		go sg.cleanupQueue.Run(stop)
-	}
-}
-
 func (sg *InternalGen) OnNack(node *model.Proxy, dr *discovery.DiscoveryRequest) {
 	// Make sure we include the ID - the DR may not include metadata
-	if dr.Node == nil {
-		dr.Node = &core.Node{}
-	}
 	dr.Node.Id = node.ID
 	sg.startPush(TypeURLNACK, []proto.Message{dr})
 }
@@ -140,11 +102,11 @@ func (s *DiscoveryServer) PushAll(res *discovery.DiscoveryResponse) {
 	// Create a temp map to avoid locking the add/remove
 	pending := []*Connection{}
 	for _, v := range s.adsClients {
-		v.proxy.RLock()
-		if v.proxy.WatchedResources[res.TypeUrl] != nil {
+		v.mu.RLock()
+		if v.node.ActiveExperimental[res.TypeUrl] != nil {
 			pending = append(pending, v)
 		}
-		v.proxy.RUnlock()
+		v.mu.RUnlock()
 	}
 	s.adsClientsMutex.RUnlock()
 
@@ -192,7 +154,7 @@ func (sg *InternalGen) startPush(typeURL string, data []proto.Message) {
 // - NACKs
 //
 // We can also expose ACKS.
-func (sg *InternalGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, req *model.PushRequest) model.Resources {
+func (sg *InternalGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates model.XdsUpdates) model.Resources {
 	res := []*any.Any{}
 
 	switch w.TypeUrl {
@@ -200,7 +162,7 @@ func (sg *InternalGen) Generate(proxy *model.Proxy, push *model.PushContext, w *
 		sg.Server.adsClientsMutex.RLock()
 		// Create a temp map to avoid locking the add/remove
 		for _, v := range sg.Server.adsClients {
-			res = append(res, util.MessageToAny(v.node))
+			res = append(res, util.MessageToAny(v.xdsNode))
 		}
 		sg.Server.adsClientsMutex.RUnlock()
 	case TypeDebugSyncronization:
@@ -224,55 +186,55 @@ func (sg *InternalGen) Generate(proxy *model.Proxy, push *model.PushContext, w *
 // isSidecar ad-hoc method to see if connection represents a sidecar
 func isProxy(con *Connection) bool {
 	return con != nil &&
-		con.proxy != nil &&
-		con.proxy.Metadata != nil &&
-		con.proxy.Metadata.ProxyConfig != nil
+		con.node != nil &&
+		con.node.Metadata != nil &&
+		con.node.Metadata.ProxyConfig != nil
 }
 
 func (sg *InternalGen) debugSyncz() []*any.Any {
 	res := []*any.Any{}
 
 	stypes := []string{
-		v3.ListenerType,
-		v3.RouteType,
-		v3.EndpointType,
-		v3.ClusterType,
+		pilot_xds_v3.ListenerShortType,
+		pilot_xds_v3.RouteShortType,
+		pilot_xds_v3.EndpointShortType,
+		pilot_xds_v3.ClusterShortType,
 	}
 
 	sg.Server.adsClientsMutex.RLock()
 	for _, con := range sg.Server.adsClients {
-		con.proxy.RLock()
+		con.mu.RLock()
 		// Skip "nodes" without metdata (they are probably istioctl queries!)
 		if isProxy(con) {
 			xdsConfigs := []*status.PerXdsConfig{}
 			for _, stype := range stypes {
 				pxc := &status.PerXdsConfig{}
-				if watchedResource, ok := con.proxy.WatchedResources[stype]; ok {
+				if watchedResource, ok := con.node.Active[stype]; ok {
 					pxc.Status = debugSyncStatus(watchedResource)
 				} else {
 					pxc.Status = status.ConfigStatus_NOT_SENT
 				}
 				switch stype {
-				case v3.ListenerType:
+				case pilot_xds_v3.ListenerShortType:
 					pxc.PerXdsConfig = &status.PerXdsConfig_ListenerConfig{}
-				case v3.RouteType:
+				case pilot_xds_v3.RouteShortType:
 					pxc.PerXdsConfig = &status.PerXdsConfig_RouteConfig{}
-				case v3.EndpointType:
+				case pilot_xds_v3.EndpointShortType:
 					pxc.PerXdsConfig = &status.PerXdsConfig_EndpointConfig{}
-				case v3.ClusterType:
+				case pilot_xds_v3.ClusterShortType:
 					pxc.PerXdsConfig = &status.PerXdsConfig_ClusterConfig{}
 				}
 				xdsConfigs = append(xdsConfigs, pxc)
 			}
 			clientConfig := &status.ClientConfig{
 				Node: &core.Node{
-					Id: con.proxy.ID,
+					Id: con.node.ID,
 				},
 				XdsConfig: xdsConfigs,
 			}
 			res = append(res, util.MessageToAny(clientConfig))
 		}
-		con.proxy.RUnlock()
+		con.mu.RUnlock()
 	}
 	sg.Server.adsClientsMutex.RUnlock()
 

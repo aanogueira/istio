@@ -24,33 +24,37 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc"
+	"istio.io/istio/galley/pkg/server/components"
+	"istio.io/istio/galley/pkg/server/settings"
+	"istio.io/istio/pilot/pkg/config/kube/crdclient"
+	"istio.io/istio/pilot/pkg/leaderelection"
+	"istio.io/istio/pilot/pkg/status"
+	"istio.io/istio/pkg/adsc"
+
 	"google.golang.org/grpc/keepalive"
+
+	"istio.io/istio/pilot/pkg/config/kube/gateway"
+	"istio.io/istio/pilot/pkg/features"
+
+	"google.golang.org/grpc"
 
 	mcpapi "istio.io/api/mcp/v1alpha1"
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networkingapi "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/galley/pkg/server/components"
-	"istio.io/istio/galley/pkg/server/settings"
+	"istio.io/pkg/log"
+
 	configaggregate "istio.io/istio/pilot/pkg/config/aggregate"
-	"istio.io/istio/pilot/pkg/config/kube/crdclient"
-	"istio.io/istio/pilot/pkg/config/kube/gateway"
 	"istio.io/istio/pilot/pkg/config/kube/ingress"
 	"istio.io/istio/pilot/pkg/config/memory"
 	configmonitor "istio.io/istio/pilot/pkg/config/monitor"
-	"istio.io/istio/pilot/pkg/features"
-	"istio.io/istio/pilot/pkg/leaderelection"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/mcp"
-	"istio.io/istio/pilot/pkg/status"
-	"istio.io/istio/pkg/adsc"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/schema/collections"
 	configz "istio.io/istio/pkg/mcp/configz/client"
 	"istio.io/istio/pkg/mcp/creds"
 	"istio.io/istio/pkg/mcp/monitoring"
 	"istio.io/istio/pkg/mcp/sink"
-	"istio.io/pkg/log"
 )
 
 const (
@@ -63,7 +67,6 @@ const (
 
 // initConfigController creates the config controller in the pilotConfig.
 func (s *Server) initConfigController(args *PilotArgs) error {
-	s.initStatusController(args, features.EnableStatus)
 	meshConfig := s.environment.Mesh()
 	if len(meshConfig.ConfigSources) > 0 {
 		// Using MCP for config.
@@ -87,29 +90,39 @@ func (s *Server) initConfigController(args *PilotArgs) error {
 		}
 	}
 
+	// Used for tests.
+	memStore := memory.Make(collections.Pilot)
+	memConfigController := memory.NewController(memStore)
+	s.ConfigStores = append(s.ConfigStores, memConfigController)
+	s.EnvoyXdsServer.MemConfigController = memConfigController
+
 	// If running in ingress mode (requires k8s), wrap the config controller.
 	if hasKubeRegistry(args.RegistryOptions.Registries) && meshConfig.IngressControllerMode != meshconfig.MeshConfig_OFF {
 		// Wrap the config controller with a cache.
 		s.ConfigStores = append(s.ConfigStores,
 			ingress.NewController(s.kubeClient, s.environment.Watcher, args.RegistryOptions.KubeOptions))
 
-		s.addTerminatingStartFunc(func(stop <-chan struct{}) error {
-			leaderelection.
-				NewLeaderElection(args.Namespace, args.PodName, leaderelection.IngressController, s.kubeClient.Kube()).
-				AddRunFunction(func(leaderStop <-chan struct{}) {
-					ingressSyncer := ingress.NewStatusSyncer(meshConfig, s.kubeClient)
-					// Start informers again. This fixes the case where informers for namespace do not start,
-					// as we create them only after acquiring the leader lock
-					// Note: stop here should be the overall pilot stop, NOT the leader election stop. We are
-					// basically lazy loading the informer, if we stop it when we lose the lock we will never
-					// recreate it again.
-					s.kubeClient.RunAndWait(stop)
-					log.Infof("Starting ingress controller")
-					ingressSyncer.Run(leaderStop)
-				}).
-				Run(stop)
-			return nil
-		})
+		ingressSyncer, err := ingress.NewStatusSyncer(meshConfig, s.kubeClient)
+		if err != nil {
+			log.Warnf("Disabled ingress status syncer due to %v", err)
+		} else {
+			s.addTerminatingStartFunc(func(stop <-chan struct{}) error {
+				leaderelection.
+					NewLeaderElection(args.Namespace, args.PodName, leaderelection.IngressController, s.kubeClient.Kube()).
+					AddRunFunction(func(leaderStop <-chan struct{}) {
+						// Start informers again. This fixes the case where informers for namespace do not start,
+						// as we create them only after acquiring the leader lock
+						// Note: stop here should be the overall pilot stop, NOT the leader election stop. We are
+						// basically lazy loading the informer, if we stop it when we lose the lock we will never
+						// recreate it again.
+						s.kubeClient.RunAndWait(stop)
+						log.Infof("Starting ingress controller")
+						ingressSyncer.Run(leaderStop)
+					}).
+					Run(stop)
+				return nil
+			})
+		}
 	}
 
 	// Wrap the config controller with a cache.
@@ -132,9 +145,6 @@ func (s *Server) initConfigController(args *PilotArgs) error {
 }
 
 func (s *Server) initK8SConfigStore(args *PilotArgs) error {
-	if s.kubeClient == nil {
-		return nil
-	}
 	configController, err := s.makeKubeConfigController(args)
 	if err != nil {
 		return err
@@ -148,7 +158,7 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 			return err
 		}
 	}
-	s.XDSServer.InternalGen.EnableWorkloadEntryController(configController)
+	s.initStatusController(args, features.EnableStatus)
 	return nil
 }
 
@@ -176,7 +186,8 @@ func (s *Server) initConfigSources(args *PilotArgs) (err error) {
 
 	mcpOptions := &mcp.Options{
 		DomainSuffix: args.RegistryOptions.KubeOptions.DomainSuffix,
-		XDSUpdater:   s.XDSServer,
+		ConfigLedger: buildLedger(args.RegistryOptions),
+		XDSUpdater:   s.EnvoyXdsServer,
 		Revision:     args.Revision,
 	}
 	reporter := monitoring.NewStatsContext("pilot")
@@ -191,7 +202,7 @@ func (s *Server) initConfigSources(args *PilotArgs) (err error) {
 				if srcAddress.Path == "" {
 					return fmt.Errorf("invalid fs config URL %s, contains no file path", configSource.Address)
 				}
-				store := memory.MakeSkipValidation(collections.Pilot, false)
+				store := memory.MakeWithLedger(collections.Pilot, buildLedger(args.RegistryOptions), false)
 				configController := memory.NewController(store)
 
 				err := s.makeFileMonitor(srcAddress.Path, args.RegistryOptions.KubeOptions.DomainSuffix, configController)
@@ -208,22 +219,21 @@ func (s *Server) initConfigSources(args *PilotArgs) (err error) {
 				return fmt.Errorf("invalid XDS config URL %s %v", configSource.Address, err)
 			}
 			// TODO: use a query param or schema to specify insecure
-			xdsMCP, err := adsc.New(srcAddress.Host, &adsc.Config{
+			xdsMCP, err := adsc.New(&meshconfig.ProxyConfig{
+				DiscoveryAddress: srcAddress.Host,
+			}, &adsc.Config{
 				Meta: model.NodeMetadata{
 					Generator: "api",
 				}.ToStruct(),
-				InitialDiscoveryRequests: adsc.ConfigInitialRequests(),
 			})
-			if err != nil {
-				return fmt.Errorf("failed to dial XDS %s %v", configSource.Address, err)
-			}
 			store := memory.Make(collections.Pilot)
 			configController := memory.NewController(store)
 			xdsMCP.Store = model.MakeIstioStore(configController)
-			err = xdsMCP.Run()
+
 			if err != nil {
-				return fmt.Errorf("MCP: failed running %v", err)
+				return fmt.Errorf("failed to dial XDS %s %v", configSource.Address, err)
 			}
+			go xdsMCP.WatchConfig()
 			s.ConfigStores = append(s.ConfigStores, configController)
 			log.Warna("Started XDS config ", s.ConfigStores)
 			continue
@@ -384,21 +394,20 @@ func (s *Server) initStatusController(args *PilotArgs, writeStatus bool) {
 		UpdateInterval: time.Millisecond * 500, // TODO: use args here?
 		PodName:        args.PodName,
 	}
-	s.statusReporter.Init(s.environment.GetLedger())
 	s.addTerminatingStartFunc(func(stop <-chan struct{}) error {
-		if writeStatus {
-			s.statusReporter.Start(s.kubeClient, args.Namespace, args.PodName, stop)
-		}
+		s.statusReporter.Start(s.kubeClient, args.Namespace, s.configController, writeStatus, stop)
 		return nil
 	})
-	s.XDSServer.StatusReporter = s.statusReporter
+	s.EnvoyXdsServer.StatusReporter = s.statusReporter
 	if writeStatus {
 		s.addTerminatingStartFunc(func(stop <-chan struct{}) error {
-			controller := status.NewController(*s.kubeRestConfig, args.Namespace)
 			leaderelection.
 				NewLeaderElection(args.Namespace, args.PodName, leaderelection.StatusController, s.kubeClient).
 				AddRunFunction(func(stop <-chan struct{}) {
-					controller.Start(stop)
+					controller := &status.DistributionController{
+						QPS:   float32(features.StatusQPS),
+						Burst: features.StatusBurst}
+					controller.Start(s.kubeRestConfig, args.Namespace, stop)
 				}).Run(stop)
 			return nil
 		})
@@ -431,7 +440,7 @@ func (s *Server) mcpController(
 }
 
 func (s *Server) makeKubeConfigController(args *PilotArgs) (model.ConfigStoreCache, error) {
-	c, err := crdclient.New(s.kubeClient, args.Revision, args.RegistryOptions.KubeOptions)
+	c, err := crdclient.New(s.kubeClient, buildLedger(args.RegistryOptions), args.Revision, args.RegistryOptions.KubeOptions)
 	if err != nil {
 		return nil, err
 	}

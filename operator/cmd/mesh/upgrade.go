@@ -30,6 +30,7 @@ import (
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 
+	iop "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
 	"istio.io/istio/operator/pkg/compare"
 	"istio.io/istio/operator/pkg/manifest"
 	"istio.io/istio/operator/pkg/name"
@@ -83,11 +84,11 @@ type upgradeArgs struct {
 // addUpgradeFlags adds upgrade related flags into cobra command
 func addUpgradeFlags(cmd *cobra.Command, args *upgradeArgs) {
 	cmd.PersistentFlags().StringSliceVarP(&args.inFilenames, "filename",
-		"f", nil, filenameFlagHelpStr)
+		"f", nil, "Path to file containing IstioOperator custom resource")
 	cmd.PersistentFlags().StringVarP(&args.kubeConfigPath, "kubeconfig",
-		"c", "", KubeConfigFlagHelpStr)
+		"c", "", "Path to kube config")
 	cmd.PersistentFlags().StringVar(&args.context, "context", "",
-		ContextFlagHelpStr)
+		"The name of the kubeconfig context to use")
 	cmd.PersistentFlags().BoolVarP(&args.skipConfirmation, "skip-confirmation", "y", false,
 		"If skip-confirmation is set, skips the prompting confirmation for value changes in this upgrade")
 	cmd.PersistentFlags().DurationVar(&args.readinessTimeout, "readiness-timeout", 300*time.Second,
@@ -134,13 +135,13 @@ func upgrade(rootArgs *rootArgs, args *upgradeArgs, l clog.Logger) (err error) {
 	}
 	setFlags := applyFlagAliases(args.set, args.manifestsPath, "")
 	// Generate IOPS parseObjectSetFromManifest
-	targetIOPYaml, targetIOP, err := manifest.GenerateConfig(args.inFilenames, setFlags, args.force, nil, l)
+	targetIOPSYaml, targetIOPS, err := manifest.GenerateConfig(args.inFilenames, setFlags, args.force, nil, l)
 	if err != nil {
 		return fmt.Errorf("failed to generate Istio configs from file %s, error: %s", args.inFilenames, err)
 	}
 
 	// Get the target version from the tag in the IOPS
-	targetTag := targetIOP.Spec.Tag
+	targetTag := targetIOPS.Tag
 	targetVersion, err := pkgversion.TagToVersionString(fmt.Sprint(targetTag))
 	if err != nil {
 		if !args.force {
@@ -151,7 +152,7 @@ func upgrade(rootArgs *rootArgs, args *upgradeArgs, l clog.Logger) (err error) {
 
 	// Get Istio control plane namespace
 	//TODO(elfinhe): support components distributed in multiple namespaces
-	istioNamespace := targetIOP.Namespace
+	istioNamespace := iop.Namespace(targetIOPS)
 
 	// Read the current Istio version from the the cluster
 	currentVersion, err := retrieveControlPlaneVersion(kubeClient, istioNamespace, l)
@@ -160,48 +161,48 @@ func upgrade(rootArgs *rootArgs, args *upgradeArgs, l clog.Logger) (err error) {
 	}
 
 	// Check if the upgrade currentVersion -> targetVersion is supported
-	err = checkSupportedVersions(kubeClient, currentVersion, targetVersion, l)
+	err = checkSupportedVersions(kubeClient, currentVersion)
 	if err != nil && !args.force {
 		return fmt.Errorf("upgrade version check failed: %v -> %v. Error: %v",
 			currentVersion, targetVersion, err)
 	}
 	l.LogAndPrintf("Upgrade version check passed: %v -> %v.\n", currentVersion, targetVersion)
 
-	// Read the overridden IOP from args.inFilenames
-	overrideIOPYaml := ""
+	// Read the overridden IOPS from args.inFilenames
+	overrideIOPSYaml := ""
 	if args.inFilenames != nil {
-		overrideIOPYaml, err = manifest.ReadLayeredYAMLs(args.inFilenames)
+		overrideIOPSYaml, err = manifest.ReadLayeredYAMLs(args.inFilenames)
 		if err != nil {
 			return fmt.Errorf("failed to read override IOPS from file: %v, error: %v", args.inFilenames, err)
 		}
-		if overrideIOPYaml != "" {
+		if overrideIOPSYaml != "" {
 			// Grab the IstioOperatorSpec subtree.
-			overrideIOPYaml, err = tpath.GetSpecSubtree(overrideIOPYaml)
+			overrideIOPSYaml, err = tpath.GetSpecSubtree(overrideIOPSYaml)
 			if err != nil {
 				return fmt.Errorf("failed to get spec subtree from IOPS yaml, error: %v", err)
 			}
 		}
 	}
 
-	// Read the current installation's profile IOP yaml to check the changed profile settings between versions.
+	// Read the current installation's profile IOPS yaml to check the changed profile settings between versions.
 	currentSets := args.set
 	if currentVersion != "" {
 		currentSets = append(currentSets, "installPackagePath="+releaseURLFromVersion(currentVersion))
 	}
-	profile := targetIOP.Spec.Profile
+	profile := targetIOPS.Profile
 	if profile == "" {
 		profile = name.DefaultProfileName
 	} else {
-		currentSets = append(currentSets, "profile="+targetIOP.Spec.Profile)
+		currentSets = append(currentSets, "profile="+targetIOPS.Profile)
 	}
-	currentProfileIOPSYaml, _, err := manifest.GenIOPFromProfile(profile, "", currentSets, true, true, nil, l)
+	currentProfileIOPSYaml, _, err := manifest.GenIOPSFromProfile(profile, "", currentSets, true, true, nil, l)
 	if err != nil {
 		return fmt.Errorf("failed to generate Istio configs from file %s for the current version: %s, error: %v",
 			args.inFilenames, currentVersion, err)
 	}
-	checkUpgradeIOPS(currentProfileIOPSYaml, targetIOPYaml, overrideIOPYaml, l)
+	checkUpgradeIOPS(currentProfileIOPSYaml, targetIOPSYaml, overrideIOPSYaml, l)
 
-	waitForConfirmation(args.skipConfirmation && !rootArgs.dryRun, l)
+	waitForConfirmation(args.skipConfirmation, l)
 
 	// Apply the Istio Control Plane specs reading from inFilenames to the cluster
 	err = InstallManifests(applyFlagAliases(args.set, args.manifestsPath, ""), args.inFilenames, args.force, rootArgs.dryRun,
@@ -261,34 +262,19 @@ func waitForConfirmation(skipConfirmation bool, l clog.Logger) {
 	}
 }
 
-var upgradeSupportStart, _ = goversion.NewVersion("1.6.0")
+var SupportedIstioVersions, _ = goversion.NewConstraint(">=1.6.0, <1.8")
 
-func checkSupportedVersions(kubeClient *Client, currentVersion, targetVersion string, l clog.Logger) error {
-	if err := verifySupportedVersion(currentVersion, targetVersion, l); err != nil {
-		return err
-	}
-	return kubeClient.CheckUnsupportedAlphaSecurityCRD()
-}
-
-func verifySupportedVersion(currentVersion, targetVersion string, l clog.Logger) error {
+func checkSupportedVersions(kubeClient *Client, currentVersion string) error {
 	curGoVersion, err := goversion.NewVersion(currentVersion)
 	if err != nil {
 		return fmt.Errorf("failed to parse the current version %q: %v", currentVersion, err)
 	}
-	targetGoVersion, err := goversion.NewVersion(targetVersion)
-	if err != nil {
-		return fmt.Errorf("failed to parse the target version %q: %v", targetVersion, err)
+
+	if !SupportedIstioVersions.Check(curGoVersion) {
+		return fmt.Errorf("upgrade is currently not supported from version: %v", currentVersion)
 	}
-	if upgradeSupportStart.Segments()[1] > curGoVersion.Segments()[1] {
-		return fmt.Errorf("upgrade is not supported before version: %v", upgradeSupportStart)
-	}
-	// Warn if user is trying skip one minor verion eg: 1.6.x to 1.8.x
-	if (targetGoVersion.Segments()[1] - curGoVersion.Segments()[1]) > 1 {
-		l.LogAndPrint("!!! WARNING !!!")
-		l.LogAndPrintf("Upgrading across more than one minor version (e.g., %v to %v)"+
-			" in one step is not officially tested or recommended.\n", curGoVersion, targetGoVersion)
-	}
-	return nil
+
+	return kubeClient.CheckUnsupportedAlphaSecurityCRD()
 }
 
 // retrieveControlPlaneVersion retrieves the version number from the Istio control plane
@@ -435,7 +421,7 @@ func (client *Client) GetIstioVersions(namespace string) ([]ComponentVersion, er
 		case "statsd-prom-bridge":
 			continue
 		case "mixer":
-			continue
+			component = pod.Labels["istio-mixer-type"]
 		}
 
 		server := ComponentVersion{
@@ -453,13 +439,13 @@ func (client *Client) GetIstioVersions(namespace string) ([]ComponentVersion, er
 			if pv == "" {
 				pv = cv
 			} else if pv != cv {
-				err := fmt.Errorf("differrent versions of containers in the same pod: %v", pod.Name)
+				err := fmt.Errorf("differrent versions of containers in the same pod: %v", pod.Spec.Containers)
 				errs = util.AppendErr(errs, err)
 			}
 		}
 		server.Version, err = pkgversion.TagToVersionString(pv)
 		if err != nil {
-			tagErr := fmt.Errorf("unable to convert tag %s into version in pod: %v", pv, pod.Name)
+			tagErr := fmt.Errorf("unable to convert tag %s into version in pod: %v", pv, pod.Spec.Containers)
 			errs = util.AppendErr(errs, tagErr)
 		}
 		res = append(res, server)

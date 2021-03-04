@@ -91,7 +91,6 @@ import (
 
 	"istio.io/api/operator/v1alpha1"
 	"istio.io/istio/operator/pkg/helm"
-	"istio.io/istio/operator/pkg/metrics"
 	"istio.io/istio/operator/pkg/object"
 	"istio.io/istio/operator/pkg/tpath"
 	"istio.io/istio/operator/pkg/util"
@@ -181,14 +180,9 @@ func applyPatches(base *object.K8sObject, patches []*v1alpha1.K8SObjectOverlay_P
 		inc, _, err := tpath.GetPathContext(bo, util.PathFromString(p.Path), true)
 		if err != nil {
 			errs = util.AppendErr(errs, err)
-			metrics.ManifestPatchErrorTotal.Increment()
 			continue
 		}
-		err = tpath.WritePathContext(inc, p.Value, false)
-		if err != nil {
-			errs = util.AppendErr(errs, err)
-			metrics.ManifestPatchErrorTotal.Increment()
-		}
+		errs = util.AppendErr(errs, tpath.WritePathContext(inc, p.Value, false))
 	}
 	oy, err := yaml.Marshal(bo)
 	if err != nil {

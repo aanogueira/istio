@@ -17,11 +17,12 @@ package status
 import (
 	"strings"
 
+	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/resource"
+
 	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"istio.io/istio/pkg/config"
-	"istio.io/istio/pkg/config/schema/collections"
 )
 
 type DistributionReport struct {
@@ -69,10 +70,10 @@ func (r Resource) String() string {
 func (r *Resource) ToModelKey() string {
 	// we have a resource here, but model keys use kind.  Use the schema to find the correct kind.
 	found, _ := collections.All.FindByPlural(r.Group, r.Version, r.Resource)
-	return config.Key(found.Resource().Kind(), r.Name, r.Namespace)
+	return model.Key(found.Resource().Kind(), r.Name, r.Namespace)
 }
 
-func ResourceFromModelConfig(c config.Config) *Resource {
+func ResourceFromModelConfig(c model.Config) *Resource {
 	gvr := GVKtoGVR(c.GroupVersionKind)
 	if gvr == nil {
 		return nil
@@ -85,7 +86,7 @@ func ResourceFromModelConfig(c config.Config) *Resource {
 	}
 }
 
-func GVKtoGVR(in config.GroupVersionKind) *schema.GroupVersionResource {
+func GVKtoGVR(in resource.GroupVersionKind) *schema.GroupVersionResource {
 	found, ok := collections.All.FindByGroupVersionKind(in)
 	if !ok {
 		return nil

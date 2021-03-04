@@ -211,7 +211,7 @@ func (o *describeOptions) addFlags(flags *pflag.FlagSet) {
 	o.filenameOption.addFlags(flags)
 
 	flags.BoolVar(&o.all, "all", true,
-		"Describe the status of all clustersByContext in the mesh")
+		"describe the status of all clustersByContext in the mesh")
 }
 
 func NewDescribeCommand() *cobra.Command {

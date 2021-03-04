@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+
 	"k8s.io/client-go/rest"
 
 	"istio.io/istio/galley/pkg/config/source/kube"
@@ -38,7 +39,7 @@ func TestCreateConfig(t *testing.T) {
 }
 
 func TestNewKubeWithInvalidConfigFileShouldFail(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 	_, err := kube.NewInterfacesFromConfigFile("badconfigfile")
 	g.Expect(err).ToNot(BeNil())
 }

@@ -20,39 +20,29 @@ import (
 	"github.com/spf13/cobra"
 
 	binversion "istio.io/istio/operator/version"
-	"istio.io/istio/pkg/url"
 	"istio.io/pkg/log"
 	"istio.io/pkg/version"
 )
 
-var (
-	baseVersion    = binversion.OperatorVersionString
+const (
+	baseVersion    = binversion.OperatorCodeBaseVersion
+	releaseURL     = `https://github.com/istio/istio/releases/download/` + baseVersion + `/istio-` + baseVersion + `-linux-amd64.tar.gz`
 	setFlagHelpStr = `Override an IstioOperator value, e.g. to choose a profile
 (--set profile=demo), enable or disable components (--set components.policy.enabled=true), or override Istio
-settings (--set meshConfig.enableTracing=true). See documentation for more info:` + url.IstioOperatorSpec
+settings (--set meshConfig.enableTracing=true). See documentation for more info:
+https://istio.io/docs/reference/config/istio.operator.v1alpha1/#IstioOperatorSpec`
 	// ManifestsFlagHelpStr is the command line description for --manifests
 	ManifestsFlagHelpStr = `Specify a path to a directory of charts and profiles
 (e.g. ~/Downloads/istio-` + baseVersion + `/manifests)
-or release tar URL (e.g. ` + url.ReleaseTar + `).
+or release tar URL (e.g. ` + releaseURL + `).
 `
-)
-
-const (
 	ChartsDeprecatedStr         = "Deprecated, use --manifests instead."
-	ControlPlaneRevStr          = "Control plane revision"
 	revisionFlagHelpStr         = `Target control plane revision for the command.`
-	skipConfirmationFlagHelpStr = `The skipConfirmation determines whether the user is prompted for confirmation.
+	skipConfirmationFlagHelpStr = `skipConfirmation determines whether the user is prompted for confirmation.
 If set to true, the user is not prompted and a Yes response is assumed in all cases.`
 	filenameFlagHelpStr = `Path to file containing IstioOperator custom resource
 This flag can be specified multiple times to overlay multiple files. Multiple files are overlaid in left to right order.`
-	installationCompleteStr  = `Installation complete`
-	ForceFlagHelpStr         = `Proceed even with validation errors.`
-	KubeConfigFlagHelpStr    = `Path to kube config.`
-	ContextFlagHelpStr       = `The name of the kubeconfig context to use.`
-	HubFlagHelpStr           = `The hub for the operator controller image.`
-	TagFlagHelpStr           = `The tag for the operator controller image.`
-	OperatorNamespaceHelpstr = `The namespace the operator controller is installed into.`
-	ComponentFlagHelpStr     = "Specify which component to generate manifests for."
+	installationCompleteStr = `Installation complete`
 )
 
 type rootArgs struct {
@@ -82,6 +72,8 @@ func GetRootCmd(args []string) *cobra.Command {
 	rootCmd.AddCommand(OperatorCmd())
 	rootCmd.AddCommand(version.CobraCommand())
 	rootCmd.AddCommand(UpgradeCmd())
+
+	version.Info.Version = binversion.OperatorVersionString
 
 	return rootCmd
 }

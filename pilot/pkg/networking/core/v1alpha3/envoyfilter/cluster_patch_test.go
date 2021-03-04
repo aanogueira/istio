@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	networking "istio.io/api/networking/v1alpha3"
+
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/memory"
 )
@@ -135,7 +136,7 @@ func Test_clusterMatch(t *testing.T) {
 	}
 }
 
-func TestClusterPatching(t *testing.T) {
+func TestApplyClusterPatches(t *testing.T) {
 	configPatches := []*networking.EnvoyFilter_EnvoyConfigObjectPatch{
 		{
 			ApplyTo: networking.EnvoyFilter_CLUSTER,
@@ -289,16 +290,9 @@ func TestClusterPatching(t *testing.T) {
 	push.InitContext(env, nil, nil)
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			efw := push.EnvoyFilters(tc.proxy)
-			output := []*cluster.Cluster{}
-			for _, c := range tc.input {
-				if ShouldKeepCluster(tc.patchContext, efw, c) {
-					output = append(output, ApplyClusterMerge(tc.patchContext, efw, c))
-				}
-			}
-			output = append(output, InsertedClusters(tc.patchContext, efw)...)
-			if diff := cmp.Diff(tc.output, output, protocmp.Transform()); diff != "" {
-				t.Errorf("%s mismatch (-want +got):\n%s", tc.name, diff)
+			got := ApplyClusterPatches(tc.patchContext, tc.proxy, push, tc.input)
+			if diff := cmp.Diff(tc.output, got, protocmp.Transform()); diff != "" {
+				t.Errorf("ApplyClusterPatches(): %s mismatch (-want +got):\n%s", tc.name, diff)
 			}
 		})
 	}

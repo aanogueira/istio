@@ -33,9 +33,11 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	"istio.io/istio/pkg/test/env"
-	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/pkg/log"
+
+	"istio.io/istio/pkg/test/util/retry"
+
+	"istio.io/istio/pkg/test/env"
 )
 
 type handler struct{}
@@ -341,7 +343,6 @@ func TestAppProbe(t *testing.T) {
 			},
 		},
 	}
-
 	testCases := []struct {
 		probePath  string
 		config     KubeAppProbers
@@ -418,6 +419,7 @@ func TestAppProbe(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create status server %v", err)
 			}
+			server.appKubeProbers = tc.config
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			go server.Run(ctx)
@@ -436,7 +438,7 @@ func TestAppProbe(t *testing.T) {
 			}
 			resp, err := client.Do(req)
 			if err != nil {
-				t.Fatal("request failed: ", err)
+				t.Fatal("request failed")
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode != tc.statusCode {

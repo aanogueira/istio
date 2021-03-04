@@ -9,5 +9,7 @@ spec:
     pilot:
       enabled: false
     ingressGateways:
-    - name: istio-ingressgateway
+
+  addonComponents:
+    prometheus:
       enabled: false

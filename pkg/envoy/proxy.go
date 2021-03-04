@@ -28,9 +28,10 @@ import (
 	"github.com/gogo/protobuf/types"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/pkg/bootstrap"
 	"istio.io/pkg/env"
 	"istio.io/pkg/log"
+
+	"istio.io/istio/pkg/bootstrap"
 )
 
 const (
@@ -49,14 +50,18 @@ type ProxyConfig struct {
 	LogLevel            string
 	ComponentLogLevel   string
 	PilotSubjectAltName []string
+	MixerSubjectAltName []string
 	NodeIPs             []string
+	PodName             string
+	PodNamespace        string
+	PodIP               net.IP
 	STSPort             int
+	ControlPlaneAuth    bool
+	DisableReportCalls  bool
 	OutlierLogPath      string
 	PilotCertProvider   string
 	ProvCert            string
 	Sidecar             bool
-	ProxyViaAgent       bool
-	CallCredentials     bool
 }
 
 // NewProxy creates an instance of the proxy control commands
@@ -115,7 +120,6 @@ func (e *envoy) args(fname string, epoch int, bootstrapConfig string) []string {
 		"--service-cluster", e.Config.ServiceCluster,
 		"--service-node", e.Node,
 		"--local-address-ip-version", proxyLocalAddressType,
-		"--bootstrap-version", "3",
 		"--log-format-prefix-with-location", "0",
 		// format is like `2020-04-07T16:52:30.471425Z     info    envoy config   ...message..
 		// this matches Istio log format
@@ -156,14 +160,18 @@ func (e *envoy) Run(config interface{}, epoch int, abort <-chan error) error {
 			Node:                e.Node,
 			Proxy:               &e.Config,
 			PilotSubjectAltName: e.PilotSubjectAltName,
+			MixerSubjectAltName: e.MixerSubjectAltName,
 			LocalEnv:            os.Environ(),
 			NodeIPs:             e.NodeIPs,
+			PodName:             e.PodName,
+			PodNamespace:        e.PodNamespace,
+			PodIP:               e.PodIP,
 			STSPort:             e.STSPort,
-			ProxyViaAgent:       e.ProxyViaAgent,
+			ControlPlaneAuth:    e.ControlPlaneAuth,
+			DisableReportCalls:  e.DisableReportCalls,
 			OutlierLogPath:      e.OutlierLogPath,
 			PilotCertProvider:   e.PilotCertProvider,
 			ProvCert:            e.ProvCert,
-			CallCredentials:     e.CallCredentials,
 			DiscoveryHost:       discHost,
 		}).CreateFileForEpoch(epoch)
 		if err != nil {

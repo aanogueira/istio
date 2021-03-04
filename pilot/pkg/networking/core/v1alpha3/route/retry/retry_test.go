@@ -19,11 +19,12 @@ import (
 	"testing"
 	"time"
 
-	previouspriorities "github.com/envoyproxy/go-control-plane/envoy/config/retry/previous_priorities"
-	envoyroute "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	gogoTypes "github.com/gogo/protobuf/types"
 	"github.com/golang/protobuf/ptypes"
 	. "github.com/onsi/gomega"
+
+	previouspriorities "github.com/envoyproxy/go-control-plane/envoy/config/retry/previous_priorities"
+	envoyroute "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/route/retry"
@@ -31,7 +32,7 @@ import (
 )
 
 func TestNilRetryShouldReturnDefault(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route where no retry policy has been explicitly set.
 	route := networking.HTTPRoute{}
@@ -42,7 +43,7 @@ func TestNilRetryShouldReturnDefault(t *testing.T) {
 }
 
 func TestZeroAttemptsShouldReturnNilPolicy(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -57,7 +58,7 @@ func TestZeroAttemptsShouldReturnNilPolicy(t *testing.T) {
 }
 
 func TestRetryWithAllFieldsSet(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -80,7 +81,7 @@ func TestRetryWithAllFieldsSet(t *testing.T) {
 }
 
 func TestRetryOnWithEmptyParts(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -98,7 +99,7 @@ func TestRetryOnWithEmptyParts(t *testing.T) {
 }
 
 func TestRetryOnWithWhitespace(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -116,7 +117,7 @@ func TestRetryOnWithWhitespace(t *testing.T) {
 }
 
 func TestRetryOnContainingStatusCodes(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -133,7 +134,7 @@ func TestRetryOnContainingStatusCodes(t *testing.T) {
 }
 
 func TestRetryOnWithInvalidStatusCodesShouldAddToRetryOn(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -150,7 +151,7 @@ func TestRetryOnWithInvalidStatusCodesShouldAddToRetryOn(t *testing.T) {
 }
 
 func TestMissingRetryOnShouldReturnDefaults(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -166,7 +167,7 @@ func TestMissingRetryOnShouldReturnDefaults(t *testing.T) {
 }
 
 func TestMissingPerTryTimeoutShouldReturnNil(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with zero attempts configured.
 	route := networking.HTTPRoute{
@@ -181,7 +182,7 @@ func TestMissingPerTryTimeoutShouldReturnNil(t *testing.T) {
 }
 
 func TestRetryRemoteLocalities(t *testing.T) {
-	g := NewWithT(t)
+	g := NewGomegaWithT(t)
 
 	// Create a route with a retry policy with RetryRemoteLocalities enabled.
 	route := networking.HTTPRoute{

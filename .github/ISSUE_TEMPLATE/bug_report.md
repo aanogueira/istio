@@ -11,11 +11,12 @@ about: Report a bug to help us improve Istio
 
 **Affected product area (please put an X in all that apply)**
 
+[ ] Configuration Infrastructure
 [ ] Docs
 [ ] Installation
 [ ] Networking
 [ ] Performance and Scalability
-[ ] Extensions and Telemetry
+[ ] Policies and Telemetry
 [ ] Security
 [ ] Test and Release
 [ ] User Experience
@@ -31,7 +32,7 @@ about: Report a bug to help us improve Istio
 
 **Steps to reproduce the bug**
 
-**Version (include the output of `istioctl version --remote` and `kubectl version --short` and `helm version` if you used Helm)**
+**Version (include the output of `istioctl version --remote` and `kubectl version` and `helm version` if you used Helm)**
 
 **How was Istio installed?**
 

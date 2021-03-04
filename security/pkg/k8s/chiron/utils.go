@@ -24,16 +24,16 @@ import (
 	"net"
 	"time"
 
+	"istio.io/istio/pkg/spiffe"
+	"istio.io/istio/security/pkg/pki/util"
+	"istio.io/pkg/log"
+
 	cert "k8s.io/api/certificates/v1beta1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	rand "k8s.io/apimachinery/pkg/util/rand"
 	certclient "k8s.io/client-go/kubernetes/typed/certificates/v1beta1"
-
-	"istio.io/istio/pkg/spiffe"
-	"istio.io/istio/security/pkg/pki/util"
-	"istio.io/pkg/log"
 )
 
 const (
@@ -44,13 +44,7 @@ const (
 	randomLength        = 18
 )
 
-// GenCsrName : Generate CSR Name for K8s system
-func GenCsrName() string {
-	name := fmt.Sprintf("csr-workload-%s", rand.String(randomLength))
-	return name
-}
-
-// getRandomCsrName : returns a random name for CSR.
+// getRandomCsrName returns a random name for CSR.
 func getRandomCsrName(secretName, namespace string) string {
 	domain := spiffe.GetTrustDomain()
 	if len(domain) > maxDomainNameLength {
@@ -70,10 +64,13 @@ func getRandomCsrName(secretName, namespace string) string {
 	return name
 }
 
-// GenKeyCertK8sCA : Generates a key pair and gets public certificate signed by K8s_CA
-// Options are meant to sign DNS certs
+// GenKeyCertK8sCA generates a certificate and key from k8s CA
+// Working flow:
 // 1. Generate a CSR
-// 2. Call SignCSRK8sCA to finish rest of the flow
+// 2. Submit a CSR
+// 3. Approve a CSR
+// 4. Read the signed certificate
+// 5. Clean up the artifacts (e.g., delete CSR)
 func GenKeyCertK8sCA(certClient certclient.CertificateSigningRequestInterface, dnsName,
 	secretName, secretNamespace, caFilePath string) ([]byte, []byte, []byte, error) {
 	// 1. Generate a CSR
@@ -88,42 +85,19 @@ func GenKeyCertK8sCA(certClient certclient.CertificateSigningRequestInterface, d
 		log.Errorf("CSR generation error (%v)", err)
 		return nil, nil, nil, err
 	}
+
+	// 2. Submit the CSR
 	csrName := getRandomCsrName(secretName, secretNamespace)
-	csrSpec := &cert.CertificateSigningRequestSpec{
-		Request: csrPEM,
-		Groups:  []string{"system:authenticated"},
-		Usages: []cert.KeyUsage{
-			cert.UsageDigitalSignature,
-			cert.UsageKeyEncipherment,
-			cert.UsageServerAuth,
-			cert.UsageClientAuth,
-		},
-	}
-
-	certChain, caCert, err := SignCSRK8s(certClient,
-		csrName, csrSpec, dnsName, caFilePath, true)
-	return certChain, keyPEM, caCert, err
-}
-
-// SignCSRK8sCA generates a certificate from CSR using the K8s CA
-// 1. Submit a CSR
-// 2. Approve a CSR
-// 3. Read the signed certificate
-// 4. Clean up the artifacts (e.g., delete CSR)
-func SignCSRK8s(certClient certclient.CertificateSigningRequestInterface,
-	csrName string, csrSpec *cert.CertificateSigningRequestSpec,
-	dnsName, caFilePath string, appendCaCert bool) ([]byte, []byte, error) {
-
-	// 1. Submit the CSR
 	numRetries := 3
-	r, err := submitCSR(certClient, csrName, csrSpec, numRetries)
+	r, err := submitCSR(certClient, csrName, csrPEM, numRetries)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if r == nil {
-		return nil, nil, fmt.Errorf("the CSR returned is nil")
+		return nil, nil, nil, fmt.Errorf("the CSR returned is nil")
 	}
-	// 2. Approve a CSR
+
+	// 3. Approve a CSR
 	log.Debugf("approve CSR (%v) ...", csrName)
 	csrMsg := fmt.Sprintf("CSR (%s) for the certificate (%s) is approved", csrName, dnsName)
 	r.Status.Conditions = append(r.Status.Conditions, cert.CertificateSigningRequestCondition{
@@ -138,30 +112,29 @@ func SignCSRK8s(certClient certclient.CertificateSigningRequestInterface,
 		if errCsr != nil {
 			log.Errorf("failed to clean up CSR (%v): %v", csrName, err)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	log.Debugf("CSR (%v) is approved: %v", csrName, reqApproval)
 
-	// 3. Read the signed certificate
+	// 4. Read the signed certificate
 	certChain, caCert, err := readSignedCertificate(certClient,
-		csrName, certReadInterval, certWatchTimeout, maxNumCertRead, caFilePath, appendCaCert)
+		csrName, certReadInterval, certWatchTimeout, maxNumCertRead, caFilePath)
 	if err != nil {
 		log.Errorf("failed to read signed cert. (%v): %v", csrName, err)
 		errCsr := cleanUpCertGen(certClient, csrName)
 		if errCsr != nil {
 			log.Errorf("failed to clean up CSR (%v): %v", csrName, err)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	// 4. Clean up the artifacts (e.g., delete CSR)
+	// 5. Clean up the artifacts (e.g., delete CSR)
 	err = cleanUpCertGen(certClient, csrName)
 	if err != nil {
 		log.Errorf("failed to clean up CSR (%v): %v", csrName, err)
 	}
 	// If there is a failure of cleaning up CSR, the error is returned.
-	return certChain, caCert, err
-
+	return certChain, keyPEM, caCert, err
 }
 
 // Read CA certificate and check whether it is a valid certificate.
@@ -214,10 +187,8 @@ func reloadCACert(wc *WebhookController) (bool, error) {
 	return certChanged, nil
 }
 
-func submitCSR(certClient certclient.CertificateSigningRequestInterface,
-	csrName string,
-	csrSpec *cert.CertificateSigningRequestSpec,
-	numRetries int) (*cert.CertificateSigningRequest, error) {
+func submitCSR(certClient certclient.CertificateSigningRequestInterface, csrName string,
+	csrPEM []byte, numRetries int) (*cert.CertificateSigningRequest, error) {
 	k8sCSR := &cert.CertificateSigningRequest{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "certificates.k8s.io/v1beta1",
@@ -226,7 +197,16 @@ func submitCSR(certClient certclient.CertificateSigningRequestInterface,
 		ObjectMeta: metav1.ObjectMeta{
 			Name: csrName,
 		},
-		Spec: *csrSpec,
+		Spec: cert.CertificateSigningRequestSpec{
+			Request: csrPEM,
+			Groups:  []string{"system:authenticated"},
+			Usages: []cert.KeyUsage{
+				cert.UsageDigitalSignature,
+				cert.UsageKeyEncipherment,
+				cert.UsageServerAuth,
+				cert.UsageClientAuth,
+			},
+		},
 	}
 	var reqRet *cert.CertificateSigningRequest
 	var errRet error
@@ -258,10 +238,8 @@ func submitCSR(certClient certclient.CertificateSigningRequestInterface,
 }
 
 // Read the signed certificate
-// verify and append CA certificate to certChain if verify is true
 func readSignedCertificate(certClient certclient.CertificateSigningRequestInterface, csrName string,
-	readInterval, watchTimeout time.Duration,
-	maxNumRead int, caCertPath string, appendCaCert bool) ([]byte, []byte, error) {
+	readInterval, watchTimeout time.Duration, maxNumRead int, caCertPath string) ([]byte, []byte, error) {
 	// First try to read the signed CSR through a watching mechanism
 	reqSigned := readSignedCsr(certClient, csrName, watchTimeout)
 	if reqSigned == nil {
@@ -361,10 +339,8 @@ func readSignedCertificate(certClient certclient.CertificateSigningRequestInterf
 	}
 	certChain := []byte{}
 	certChain = append(certChain, certPEM...)
+	certChain = append(certChain, caCert...)
 
-	if appendCaCert {
-		certChain = append(certChain, caCert...)
-	}
 	return certChain, caCert, nil
 }
 
